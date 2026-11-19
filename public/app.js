@@ -646,6 +646,7 @@
         if (!window.turnstile || turnstileWidgetId !== null) return;
         turnstileWidgetId = window.turnstile.render(slot, {
           sitekey: turnstileSiteKey,
+          action: 'analyze',
           theme: document.documentElement.getAttribute('data-theme') === 'carbon' ? 'dark' : 'light',
           callback: (token) => {
             turnstileToken = token;

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const net = require('node:net');
 
-const { createAppServer } = require('../src/server');
+const { createAppServer, validateTurnstilePayload } = require('../src/server');
 const {
   buildScraperProxyEndpoint,
   extractSafeMetadataFromHtml,
@@ -761,6 +761,21 @@ test('Affiliate links, dynamic AdSense/Cloudflare CSP, ads.txt, trust pages & pr
         assert.equal(res.statusCode, 200, `Expected HTTP 200 for ${page}`);
         assert.match(res.body, /<meta name="google-adsense-account" content="ca-pub-1234567890123456">/);
       }
+
+      // 5. Canonical Turnstile siteverify payload checks (action + production hostname allowlist)
+      process.env.CF_TURNSTILE_HOSTNAMES = 'realpricenolies.online,real-price-no-lies-production.up.railway.app';
+      assert.equal(
+        validateTurnstilePayload({ success: true, action: 'analyze', hostname: 'realpricenolies.online' }),
+        true
+      );
+      assert.equal(
+        validateTurnstilePayload({ success: true, action: 'wrong_action', hostname: 'realpricenolies.online' }),
+        false
+      );
+      assert.equal(
+        validateTurnstilePayload({ success: true, action: 'analyze', hostname: 'localhost' }),
+        false
+      );
     } finally {
       await stopTestServer(server);
     }

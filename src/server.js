@@ -116,12 +116,34 @@ function buildAdsTxtBody() {
 }
 
 /**
+ * Validates the decoded response payload returned by Cloudflare Turnstile /siteverify.
+ * Checks success, expected action ('analyze'), and optional CF_TURNSTILE_HOSTNAMES allowlist.
+ */
+function validateTurnstilePayload(data) {
+  if (!data || data.success !== true) return false;
+  if (data.action !== 'analyze') return false;
+  const allowedRaw = (process.env.CF_TURNSTILE_HOSTNAMES || '').trim();
+  if (allowedRaw) {
+    const allowedHostnames = new Set(
+      allowedRaw
+        .split(',')
+        .map((h) => h.trim().toLowerCase())
+        .filter(Boolean)
+    );
+    if (allowedHostnames.size > 0 && !allowedHostnames.has(String(data.hostname || '').toLowerCase())) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Verifies an optional Cloudflare Turnstile challenge token when Turnstile is enabled.
  */
 function verifyTurnstileToken(token, remoteIp) {
   const secret = (process.env.CF_TURNSTILE_SECRET_KEY || '').trim();
   if (!secret) return Promise.resolve(true);
-  if (typeof token !== 'string' || !token.trim() || token.length > 4096) {
+  if (typeof token !== 'string' || !token.trim() || token.length > 2048) {
     return Promise.resolve(false);
   }
 
@@ -143,12 +165,17 @@ function verifyTurnstileToken(token, remoteIp) {
         }
       },
       (res) => {
+        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+          res.resume();
+          resolve(false);
+          return;
+        }
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
         res.on('end', () => {
           try {
             const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-            resolve(Boolean(data && data.success === true));
+            resolve(validateTurnstilePayload(data));
           } catch {
             resolve(false);
           }
@@ -509,5 +536,6 @@ module.exports = {
   buildAdsTxtBody,
   buildPublicConfigPayload,
   createAppServer,
-  resolveStaticFile
+  resolveStaticFile,
+  validateTurnstilePayload
 };
