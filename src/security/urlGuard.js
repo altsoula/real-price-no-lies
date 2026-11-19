@@ -513,30 +513,49 @@ function isBotChallengeHtml(html) {
   return false;
 }
 
+function parseAvailabilityFlag(rawAvail) {
+  const str = String(rawAvail || '').toLowerCase();
+  if (!str) return null;
+  if (/(outofstock|soldout|discontinued|out_of_stock|sold_out)/.test(str)) return false;
+  if (/(instock|onlineonly|limitedavailability|in_stock)/.test(str)) return true;
+  return null;
+}
+
 /**
- * Extracts bounded plain-text title, price, currency, and brand clues from raw HTML.
- * Never executes scripts or parses unsafe DOM trees.
- * @param {string} html
+ * Extracts bounded plain-text title, price, currency, stock availability, and brand clues from Offer/AggregateOffer nodes.
  */
 function extractFromOfferNode(offer, result) {
   if (!offer || typeof offer !== 'object') return;
-  const offerObj = Array.isArray(offer) ? offer[0] : offer;
-  if (!offerObj || typeof offerObj !== 'object') return;
+  if (Array.isArray(offer)) {
+    const inStockFirst = offer.find((o) => o && parseAvailabilityFlag(o.availability) !== false) || offer[0];
+    extractFromOfferNode(inStockFirst, result);
+    return;
+  }
 
-  // Standard Offer.price / Offer.lowPrice
-  const directPrice = parseLocalizedPrice(String(offerObj.price ?? offerObj.lowPrice ?? ''));
+  // Handle Schema.org AggregateOffer wrapping nested individual offers
+  if (Array.isArray(offer.offers) && offer.offers.length > 0) {
+    extractFromOfferNode(offer.offers, result);
+  }
+
+  const availFlag = parseAvailabilityFlag(offer.availability);
+  if (result.inStock === null && availFlag !== null) {
+    result.inStock = availFlag;
+  }
+
+  // Standard Offer.price / AggregateOffer.lowPrice
+  const directPrice = parseLocalizedPrice(String(offer.price ?? offer.lowPrice ?? ''));
   if (!result.price && directPrice) {
     result.price = directPrice;
   }
-  if (!result.currency && typeof offerObj.priceCurrency === 'string') {
-    result.currency = sanitizeText(offerObj.priceCurrency, 3).toUpperCase();
+  if (!result.currency && typeof offer.priceCurrency === 'string') {
+    result.currency = sanitizeText(offer.priceCurrency, 3).toUpperCase();
   }
 
   // IKEA & European Schema.org Offer.priceSpecification array
-  if (offerObj.priceSpecification) {
-    const specs = Array.isArray(offerObj.priceSpecification)
-      ? offerObj.priceSpecification
-      : [offerObj.priceSpecification];
+  if (offer.priceSpecification) {
+    const specs = Array.isArray(offer.priceSpecification)
+      ? offer.priceSpecification
+      : [offer.priceSpecification];
     for (const spec of specs) {
       if (!spec || typeof spec !== 'object') continue;
       const specPrice = parseLocalizedPrice(String(spec.price ?? ''));
@@ -563,6 +582,7 @@ function extractSafeMetadataFromHtml(html) {
     referencePrice: null,
     currency: null,
     brand: null,
+    inStock: null,
     isBotChallenge: false
   };
 
@@ -626,15 +646,48 @@ function extractSafeMetadataFromHtml(html) {
     result.currency = metaCurrMatch[1].toUpperCase();
   }
 
-  // Safely inspect bounded JSON-LD Product / ProductGroup blocks without executing anything.
+  // Schema.org Microdata itemprop fallbacks
+  if (!result.price) {
+    const microPriceMatch =
+      html.match(/itemprop=["']price["'][^>]+content=["']([0-9.,]{1,20})["']/i) ||
+      html.match(/content=["']([0-9.,]{1,20})["'][^>]+itemprop=["']price["']/i) ||
+      html.match(/itemprop=["']price["'][^>]*>([^<]{1,24})<\//i);
+    if (microPriceMatch) {
+      result.price = parseLocalizedPrice(microPriceMatch[1]);
+    }
+  }
+  if (!result.currency) {
+    const microCurrMatch =
+      html.match(/itemprop=["']priceCurrency["'][^>]+content=["']([A-Za-z]{3})["']/i) ||
+      html.match(/content=["']([A-Za-z]{3})["'][^>]+itemprop=["']priceCurrency["']/i);
+    if (microCurrMatch) {
+      result.currency = microCurrMatch[1].toUpperCase();
+    }
+  }
+  if (result.inStock === null) {
+    const microAvailMatch = html.match(/itemprop=["']availability["'][^>]+(?:href|content)=["']([^"']{4,120})["']/i);
+    if (microAvailMatch) {
+      result.inStock = parseAvailabilityFlag(microAvailMatch[1]);
+    }
+  }
+
+  // Safely inspect bounded JSON-LD Product / ProductGroup / mainEntity blocks without executing anything.
   const ldBlocks = html.match(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]{1,250000}?)<\/script>/gi);
   if (ldBlocks) {
-    for (const block of ldBlocks.slice(0, 6)) {
+    for (const block of ldBlocks.slice(0, 8)) {
       const innerMatch = block.match(/>([\s\S]*)<\/script>/i);
       if (!innerMatch) continue;
       try {
         const data = JSON.parse(innerMatch[1]);
-        const candidates = Array.isArray(data) ? data : data['@graph'] ? data['@graph'] : [data];
+        const rawNodes = Array.isArray(data) ? data : data['@graph'] ? data['@graph'] : [data];
+        const candidates = [];
+        for (const n of rawNodes) {
+          if (!n || typeof n !== 'object') continue;
+          candidates.push(n);
+          if (n.mainEntity && typeof n.mainEntity === 'object') {
+            candidates.push(n.mainEntity);
+          }
+        }
         for (const item of candidates) {
           if (!item || typeof item !== 'object') continue;
           const typeStr = String(item['@type'] || '').toLowerCase();
@@ -656,11 +709,10 @@ function extractSafeMetadataFromHtml(html) {
               let bestCurrency = null;
               for (const variant of item.hasVariant.slice(0, 25)) {
                 if (!variant || typeof variant !== 'object' || !variant.offers) continue;
-                const tmp = { price: null, referencePrice: null, currency: null };
+                const tmp = { price: null, referencePrice: null, currency: null, inStock: null };
                 extractFromOfferNode(variant.offers, tmp);
                 if (!tmp.price) continue;
-                const avail = String(variant.offers.availability || '').toLowerCase();
-                const inStock = !avail || avail.includes('instock');
+                const inStock = tmp.inStock !== false;
                 if (inStock && (bestVariantPrice === null || tmp.price < bestVariantPrice)) {
                   bestVariantPrice = tmp.price;
                   bestCurrency = tmp.currency;
@@ -668,6 +720,7 @@ function extractSafeMetadataFromHtml(html) {
               }
               if (bestVariantPrice !== null) {
                 result.price = bestVariantPrice;
+                result.inStock = true;
                 if (!result.currency && bestCurrency) result.currency = bestCurrency;
               } else {
                 extractFromOfferNode(item.hasVariant[0].offers, result);
@@ -960,6 +1013,7 @@ async function safeFetchProductSignals(urlInfo) {
           return {
             liveFetched: true,
             viaProxy: true,
+            httpStatus: 200,
             finalUrl: currentInfo.normalizedUrl,
             metadata: proxyMeta
           };
@@ -967,6 +1021,7 @@ async function safeFetchProductSignals(urlInfo) {
       }
       return {
         liveFetched: false,
+        httpStatus: res.statusCode || null,
         reason: `Store returned ${res.reason || 'shielded response'}; falling back to live web price search.`
       };
     }
@@ -980,6 +1035,7 @@ async function safeFetchProductSignals(urlInfo) {
           return {
             liveFetched: true,
             viaProxy: true,
+            httpStatus: 200,
             finalUrl: currentInfo.normalizedUrl,
             metadata: proxyMeta
           };
@@ -987,12 +1043,14 @@ async function safeFetchProductSignals(urlInfo) {
       }
       return {
         liveFetched: false,
+        httpStatus: res.statusCode || 200,
         reason: 'Store bot-protection stub detected; falling back to live web price search.'
       };
     }
 
     return {
       liveFetched: true,
+      httpStatus: res.statusCode || 200,
       finalUrl: currentInfo.normalizedUrl,
       metadata
     };

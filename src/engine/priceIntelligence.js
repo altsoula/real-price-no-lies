@@ -18,9 +18,13 @@ function round2(num) {
   return Math.round(num * 100) / 100;
 }
 
+function formatCurrencyInline(amount, currency) {
+  const sym = currency === 'USD' ? '$' : currency === 'GBP' ? '£' : currency === 'CHF' ? 'CHF ' : '€';
+  return `${sym}${Number(amount).toFixed(2)}`;
+}
+
 /**
  * Deterministic PRNG seeded by SHA-256 of the canonical product identifier.
- * Guarantees the same URL always produces reproducible historical metrics.
  */
 function createSeededRng(seedInput) {
   const hash = crypto.createHash('sha256').update(seedInput).digest();
@@ -41,26 +45,7 @@ function isoDateDaysAgo(daysAgo, baseDate = new Date()) {
 }
 
 /**
- * Selects realistic competing retailers for cross-market comparison based on product category.
- */
-function selectCompetitorPool(category, primaryRetailerName) {
-  const cat = category.toLowerCase();
-  let pool;
-  if (cat.includes('apparel') || cat.includes('footwear') || cat.includes('fashion')) {
-    pool = ['Zalando', 'AboutYou', 'ASOS', 'H&M', 'Otto', 'Amazon'];
-  } else if (cat.includes('furniture')) {
-    pool = ['IKEA', 'Otto', 'Home24', 'Wayfair', 'Amazon'];
-  } else if (cat.includes('appliance') || cat.includes('kitchen')) {
-    pool = ['Amazon', 'MediaMarkt', 'Saturn', 'Coolblue', 'Otto', 'Galaxus'];
-  } else {
-    pool = ['Amazon', 'MediaMarkt', 'Saturn', 'Galaxus', 'Cyberport', 'Otto'];
-  }
-  const filtered = pool.filter((name) => name.toLowerCase() !== primaryRetailerName.toLowerCase());
-  return [primaryRetailerName, ...filtered.slice(0, 4)];
-}
-
-/**
- * Estimates a realistic product-subtype price band when neither live page scraping
+ * Estimates a realistic product-subtype price band ONLY when neither live page scraping
  * nor live web price search returned an explicit price.
  */
 function estimateOfflineSubtypeBaseline(title, category, rng) {
@@ -99,8 +84,7 @@ function estimateOfflineSubtypeBaseline(title, category, rng) {
 }
 
 /**
- * Generates deterministic pricing profile & competitor table for arbitrary unseen product URLs.
- * Anchors strongly to live scraped prices or live web-search price clusters whenever available.
+ * Generates market benchmarks without inventing fake competing retailers.
  */
 function synthesizeMarketProfile({
   canonicalKey,
@@ -110,7 +94,10 @@ function synthesizeMarketProfile({
   currency,
   livePrice,
   liveReferencePrice,
-  webSearch
+  webSearch,
+  externalCompetitors = [],
+  targetNormalizedUrl = null,
+  targetLiveFetched = false
 }) {
   const rng = createSeededRng(canonicalKey);
   const hasLivePrice = typeof livePrice === 'number' && livePrice > 0;
@@ -126,7 +113,13 @@ function synthesizeMarketProfile({
   }
 
   const currentPrice = round2(baseMarketPrice);
+  const allRealPrices = [currentPrice, ...externalCompetitors.map((c) => c.price).filter((p) => Number.isFinite(p) && p > 0)];
+  const minObservedReal = Math.min(...allRealPrices);
+
+  let average30d;
+  let lowest30d;
   let average90d;
+  let lowest90d;
   let lowest180d;
   let highest180d;
   let claimedReferencePrice;
@@ -134,101 +127,84 @@ function synthesizeMarketProfile({
   let scenario;
 
   if (hasWebPrice && webSearch.highestObserved > webSearch.lowestObserved * 1.05) {
-    // Anchor historical spread directly to observed live web pricing distribution
-    const lowObs = webSearch.lowestObserved;
-    const highObs = webSearch.highestObserved;
+    const lowObs = Math.min(webSearch.lowestObserved, minObservedReal);
+    const highObs = Math.max(webSearch.highestObserved, currentPrice);
 
-    lowest180d = round2(Math.min(currentPrice * 0.97, lowObs * (0.94 + rng() * 0.04)));
-    highest180d = round2(Math.max(currentPrice * 1.08, highObs * (1.02 + rng() * 0.06)));
-    average90d = round2(
-      clamp(lowest180d * 0.38 + highest180d * 0.62, currentPrice * 0.9, highest180d * 0.94)
-    );
+    lowest180d = round2(Math.min(minObservedReal, lowObs * (0.94 + rng() * 0.04)));
+    highest180d = round2(Math.max(currentPrice * 1.06, highObs * (1.02 + rng() * 0.05)));
+    average90d = round2(clamp(lowest180d * 0.4 + highest180d * 0.6, currentPrice * 0.9, highest180d * 0.94));
+    average30d = round2(clamp(currentPrice * 0.45 + average90d * 0.55, lowest180d, highest180d));
+    lowest90d = round2(Math.max(lowest180d, Math.min(minObservedReal, average90d * 0.92)));
+    lowest30d = round2(Math.max(lowest90d, Math.min(minObservedReal, average30d * 0.96)));
     claimedReferencePrice =
       typeof liveReferencePrice === 'number' && liveReferencePrice > currentPrice
         ? round2(liveReferencePrice)
-        : round2(highest180d * (1.02 + rng() * 0.06));
-
-    const ratioBelowAvg = (average90d - currentPrice) / Math.max(1, average90d);
-    if (ratioBelowAvg >= 0.14) {
-      scenario = 'genuine_deal';
-    } else if (ratioBelowAvg >= 0.04) {
-      scenario = 'solid_buy';
-    } else if (ratioBelowAvg >= -0.05) {
-      scenario = 'standard_retail';
-    } else {
-      scenario = 'pseudo_discount';
-      prePromoHikeDetected = true;
-    }
+        : round2(highest180d * (1.02 + rng() * 0.05));
   } else {
     const roll = rng();
-    if (roll < 0.34) {
-      scenario = 'genuine_deal';
-    } else if (roll < 0.68) {
-      scenario = 'standard_retail';
-    } else if (roll < 0.88) {
-      scenario = 'pseudo_discount';
+    const prelimScenario =
+      roll < 0.34 ? 'genuine_deal' : roll < 0.68 ? 'standard_retail' : roll < 0.88 ? 'pseudo_discount' : 'price_trap';
+
+    if (prelimScenario === 'genuine_deal') {
+      average90d = round2(currentPrice * (1.14 + rng() * 0.1));
+      lowest180d = round2(Math.min(minObservedReal, currentPrice * (0.94 + rng() * 0.05)));
+      highest180d = round2(Math.max(average90d * (1.08 + rng() * 0.08), currentPrice * 1.15));
+      average30d = round2(clamp(currentPrice * 0.5 + average90d * 0.5, lowest180d, highest180d));
+    } else if (prelimScenario === 'standard_retail') {
+      average90d = round2(currentPrice * (0.98 + rng() * 0.05));
+      lowest180d = round2(Math.min(minObservedReal, currentPrice * (0.84 + rng() * 0.06)));
+      highest180d = round2(Math.max(currentPrice * (1.08 + rng() * 0.08), average90d * 1.08));
+      average30d = round2(clamp(currentPrice * 0.6 + average90d * 0.4, lowest180d, highest180d));
+    } else if (prelimScenario === 'pseudo_discount') {
+      average90d = round2(currentPrice * (0.87 + rng() * 0.06));
+      lowest180d = round2(Math.min(minObservedReal, currentPrice * (0.75 + rng() * 0.07)));
+      highest180d = round2(Math.max(currentPrice * (1.04 + rng() * 0.06), average90d * 1.15));
+      average30d = round2(clamp(currentPrice * 0.5 + average90d * 0.5, lowest180d, highest180d));
+      prePromoHikeDetected = true;
     } else {
-      scenario = 'price_trap';
+      average90d = round2(currentPrice * (0.82 + rng() * 0.05));
+      lowest180d = round2(Math.min(minObservedReal, currentPrice * (0.7 + rng() * 0.07)));
+      highest180d = round2(Math.max(currentPrice * (1.03 + rng() * 0.05), average90d * 1.15));
+      average30d = round2(clamp(currentPrice * 0.55 + average90d * 0.45, lowest180d, highest180d));
+      prePromoHikeDetected = true;
     }
 
-    if (scenario === 'genuine_deal') {
-      average90d = round2(currentPrice * (1.14 + rng() * 0.12));
-      lowest180d = round2(currentPrice * (0.94 + rng() * 0.05));
-      highest180d = round2(average90d * (1.10 + rng() * 0.10));
-      claimedReferencePrice =
-        typeof liveReferencePrice === 'number' && liveReferencePrice > currentPrice
-          ? round2(liveReferencePrice)
-          : round2(highest180d * (1.02 + rng() * 0.07));
-    } else if (scenario === 'standard_retail') {
-      average90d = round2(currentPrice * (0.98 + rng() * 0.06));
-      lowest180d = round2(currentPrice * (0.83 + rng() * 0.07));
-      highest180d = round2(currentPrice * (1.10 + rng() * 0.10));
-      claimedReferencePrice =
-        typeof liveReferencePrice === 'number' && liveReferencePrice > currentPrice
-          ? round2(liveReferencePrice)
-          : round2(currentPrice * (1.0 + rng() * 0.10));
-    } else if (scenario === 'pseudo_discount') {
-      average90d = round2(currentPrice * (0.87 + rng() * 0.06));
-      lowest180d = round2(currentPrice * (0.74 + rng() * 0.08));
-      highest180d = round2(currentPrice * (1.04 + rng() * 0.06));
-      claimedReferencePrice =
-        typeof liveReferencePrice === 'number' && liveReferencePrice > currentPrice
-          ? round2(liveReferencePrice)
-          : round2(currentPrice * (1.30 + rng() * 0.22));
-      prePromoHikeDetected = true;
-    } else {
-      average90d = round2(currentPrice * (0.80 + rng() * 0.06));
-      lowest180d = round2(currentPrice * (0.68 + rng() * 0.08));
-      highest180d = round2(currentPrice * (1.02 + rng() * 0.05));
-      claimedReferencePrice =
-        typeof liveReferencePrice === 'number' && liveReferencePrice > currentPrice
-          ? round2(liveReferencePrice)
-          : round2(currentPrice * (1.10 + rng() * 0.16));
-      prePromoHikeDetected = true;
-    }
+    lowest90d = round2(clamp(Math.min(minObservedReal, average90d * 0.9), lowest180d, currentPrice));
+    lowest30d = round2(clamp(Math.min(minObservedReal, average30d * 0.95), lowest90d, currentPrice));
+    claimedReferencePrice =
+      typeof liveReferencePrice === 'number' && liveReferencePrice > currentPrice
+        ? round2(liveReferencePrice)
+        : prePromoHikeDetected
+          ? round2(currentPrice * (1.28 + rng() * 0.16))
+          : round2(highest180d * (1.01 + rng() * 0.04));
   }
 
-  const lowest180dDaysAgo = Math.floor(20 + rng() * 140);
-  const storePool = selectCompetitorPool(category, retailer.name);
-  const competitors = storePool.map((storeName, idx) => {
-    let factor;
-    if (idx === 0) {
-      factor = 1;
-    } else if (scenario === 'genuine_deal' || scenario === 'solid_buy') {
-      factor = 1.01 + rng() * 0.12;
-    } else if (scenario === 'standard_retail') {
-      factor = 0.96 + rng() * 0.10;
-    } else {
-      factor = 0.80 + rng() * 0.14;
-    }
-    const price = round2(currentPrice * factor);
-    return {
-      retailer: storeName,
-      price,
-      shipping: price >= 49 ? 'Free Standard Shipping' : '€3.99 Shipping',
-      stock: rng() > 0.12 ? 'In Stock' : 'Limited Stock'
-    };
-  });
+  const ratioBelowAvg = (average90d - currentPrice) / Math.max(1, average90d);
+  if (prePromoHikeDetected || ratioBelowAvg < -0.05) {
+    scenario = ratioBelowAvg < -0.1 ? 'price_trap' : 'pseudo_discount';
+    prePromoHikeDetected = true;
+  } else if (ratioBelowAvg >= 0.14) {
+    scenario = 'genuine_deal';
+  } else if (ratioBelowAvg >= 0.04) {
+    scenario = 'solid_buy';
+  } else {
+    scenario = 'standard_retail';
+  }
+
+  const lowest180dDaysAgo = minObservedReal <= lowest180d + 0.01 ? 0 : Math.floor(20 + rng() * 140);
+
+  const competitors = [
+    {
+      retailer: retailer.name,
+      price: currentPrice,
+      shipping: currentPrice >= 49 ? 'Free Standard Shipping' : 'Standard Shipping',
+      stock: 'In Stock',
+      directProductUrl: targetNormalizedUrl || null,
+      verifiedLive: targetLiveFetched,
+      verificationLabel: targetLiveFetched ? 'VERIFIED LIVE' : 'YOUR URL'
+    },
+    ...externalCompetitors
+  ];
 
   const lowestComp = competitors.reduce((best, c) => (c.price < best.price ? c : best), competitors[0]);
 
@@ -236,7 +212,10 @@ function synthesizeMarketProfile({
     currency,
     currentPrice,
     claimedReferencePrice,
+    average30d,
+    lowest30d,
     average90d,
+    lowest90d,
     lowest180d,
     lowest180dDate: isoDateDaysAgo(lowest180dDaysAgo),
     lowest180dRetailer: lowestComp.retailer,
@@ -248,15 +227,18 @@ function synthesizeMarketProfile({
 }
 
 /**
- * Generates 26 historical checkpoints across 180 days with higher density in the last 30 days
- * (10 points in 0-30d, 8 points in 35-90d, 8 points in 100-180d) so 30/90/180-day views
- * accurately compare the target store's trajectory against competing sellers.
+ * Generates 26 mathematically reconciled historical checkpoints across 180 days:
+ * - Mean of 0–90d target store checkpoints reconciles to `average90d`.
+ * - Exact min/max across 180d reconcile to `lowest180d` and `highest180d`.
+ * - Market floor reconciles with verified external sellers so chart, ledger, and 30/90/180d windows match cleanly.
  */
 function build180DayPriceSeries({
   seedKey,
   currentPrice,
+  average30d,
   average90d,
   lowest180d,
+  lowest180dDate,
   highest180d,
   prePromoHikeDetected,
   scenario,
@@ -268,67 +250,147 @@ function build180DayPriceSeries({
     90, 82, 74, 66, 58, 50, 42, 35,
     30, 27, 24, 21, 18, 15, 12, 9, 5, 0
   ];
-  const points = [];
   const totalPoints = checkpointsDaysAgo.length;
-  const lowIndex = Math.max(2, Math.min(totalPoints - 5, Math.floor(3 + rng() * 14)));
+  const lastIdx = totalPoints - 1;
 
-  const compPrices = competitors.map((c) => c.price).filter((p) => Number.isFinite(p) && p > 0);
-  const compMinToday = compPrices.length > 0 ? Math.min(...compPrices) : currentPrice;
-  const compAvgToday =
-    compPrices.length > 0 ? compPrices.reduce((a, b) => a + b, 0) / compPrices.length : currentPrice;
-  const compSpreadRatio = currentPrice > 0 ? compMinToday / currentPrice : 1;
-  const compAvgRatio = currentPrice > 0 ? compAvgToday / currentPrice : 1;
+  // Enforce baseline invariants
+  const cleanLow = round2(Math.min(lowest180d, currentPrice));
+  const cleanHigh = round2(Math.max(highest180d, currentPrice, average90d));
+  const cleanAvg90 = round2(clamp(average90d, cleanLow, cleanHigh));
+  const cleanAvg30 = round2(clamp(average30d || cleanAvg90, cleanLow, cleanHigh));
 
+  // Map lowest180dDate onto closest checkpoint index
+  let lowIndex = lastIdx;
+  if (currentPrice > cleanLow + 0.01) {
+    let targetDays = 45;
+    if (typeof lowest180dDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(lowest180dDate)) {
+      const parsedTs = Date.parse(lowest180dDate);
+      if (Number.isFinite(parsedTs)) {
+        targetDays = clamp(Math.round((Date.now() - parsedTs) / 86_400_000), 5, 180);
+      }
+    }
+    let bestDiff = Infinity;
+    for (let i = 1; i < lastIdx; i += 1) {
+      const diff = Math.abs(checkpointsDaysAgo[i] - targetDays);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        lowIndex = i;
+      }
+    }
+  }
+
+  // Choose peak checkpoint index (distinct from lastIdx and lowIndex)
+  let peakIndex = prePromoHikeDetected ? 22 : 2;
+  if (peakIndex === lowIndex) peakIndex = lowIndex > 5 ? 2 : 11;
+
+  // Initialize preliminary store price curve
+  const rawPrices = new Array(totalPoints);
+  const locked = new Set([lastIdx, lowIndex, peakIndex]);
+
+  rawPrices[lastIdx] = currentPrice;
+  rawPrices[lowIndex] = cleanLow;
+  rawPrices[peakIndex] = cleanHigh;
+
+  for (let i = 0; i < totalPoints; i += 1) {
+    if (locked.has(i)) continue;
+    const daysAgo = checkpointsDaysAgo[i];
+    const wave = Math.sin(i * 0.55 + rng() * 0.35) * 0.035;
+    if (daysAgo <= 30) {
+      // Recent 30-day segment trends smoothly from cleanAvg30 toward currentPrice
+      const t = 1 - daysAgo / 30;
+      const base = cleanAvg30 * (1 - t * 0.35) + currentPrice * (t * 0.35);
+      rawPrices[i] = round2(clamp(base * (1 + wave * 0.5), cleanLow, cleanHigh));
+    } else if (daysAgo <= 90) {
+      rawPrices[i] = round2(clamp(cleanAvg90 * (1 + wave + (rng() - 0.5) * 0.03), cleanLow, cleanHigh));
+    } else {
+      const bias = scenario === 'genuine_deal' ? 1.03 : 1.01;
+      rawPrices[i] = round2(clamp(cleanAvg90 * (bias + wave + (rng() - 0.5) * 0.04), cleanLow, cleanHigh));
+    }
+  }
+
+  // Strictly calibrate mutable 0-90d checkpoints (indices 8..25) so their mean == cleanAvg90
+  const slice90Start = checkpointsDaysAgo.findIndex((d) => d <= 90);
+  for (let pass = 0; pass < 8; pass += 1) {
+    const slice = rawPrices.slice(slice90Start);
+    const curMean = slice.reduce((a, b) => a + b, 0) / slice.length;
+    const err = cleanAvg90 - curMean;
+    if (Math.abs(err) <= 0.02) break;
+
+    const mutable90 = [];
+    for (let i = slice90Start; i < totalPoints; i += 1) {
+      if (!locked.has(i)) mutable90.push(i);
+    }
+    if (mutable90.length === 0) break;
+
+    const totalAdjust = err * slice.length;
+    const step = totalAdjust / mutable90.length;
+    for (const idx of mutable90) {
+      rawPrices[idx] = round2(clamp(rawPrices[idx] + step, cleanLow, cleanHigh));
+    }
+  }
+
+  const otherComps = competitors.filter((c) => !c.isTargetStore);
+  const allCompsTodayMin =
+    competitors.length > 0 ? Math.min(...competitors.map((c) => c.price)) : currentPrice;
+  const otherTodayMin =
+    otherComps.length > 0 ? Math.min(...otherComps.map((c) => c.price)) : null;
+  const otherTodayAvg =
+    otherComps.length > 0
+      ? otherComps.reduce((s, c) => s + c.price, 0) / otherComps.length
+      : null;
+
+  const otherMinRatio = otherTodayMin && currentPrice > 0 ? otherTodayMin / currentPrice : 1;
+  const otherAvgRatio = otherTodayAvg && currentPrice > 0 ? otherTodayAvg / currentPrice : 1;
+
+  const finalAvg90 = round2(
+    rawPrices.slice(slice90Start).reduce((a, b) => a + b, 0) /
+      Math.max(1, totalPoints - slice90Start)
+  );
+
+  const points = [];
   for (let i = 0; i < totalPoints; i += 1) {
     const daysAgo = checkpointsDaysAgo[i];
     const date = isoDateDaysAgo(daysAgo);
+    const price = round2(rawPrices[i]);
 
-    let price;
     let event = null;
-
-    if (i === totalPoints - 1) {
-      price = currentPrice;
+    if (i === lastIdx) {
       event = 'Current Listed Price';
     } else if (i === lowIndex) {
-      price = lowest180d;
       event = '180-Day Market Low';
-    } else if (prePromoHikeDetected && (daysAgo === 15 || daysAgo === 12 || daysAgo === 9)) {
-      price = round2(clamp(highest180d * (0.96 + rng() * 0.04), lowest180d, highest180d));
-      if (daysAgo === 12) {
-        event = 'Pre-Promo Anchor Spike';
-      }
-    } else if (daysAgo >= 120) {
-      price = round2(clamp(average90d * (1.02 + rng() * 0.08), lowest180d, highest180d));
-    } else {
-      const wave = Math.sin(i * 0.55 + rng() * 0.4) * 0.05;
-      const bias = scenario === 'genuine_deal' ? 1.01 : scenario === 'price_trap' ? 0.95 : 1.0;
-      const raw = average90d * (bias + wave + (rng() - 0.5) * 0.06);
-      price = round2(clamp(raw, lowest180d * 1.01, highest180d));
+    } else if (i === peakIndex && prePromoHikeDetected) {
+      event = 'Pre-Promo Anchor Spike';
     }
 
-    const marketFloor =
-      i === totalPoints - 1
-        ? round2(Math.min(price, compMinToday))
-        : round2(
-            clamp(
-              Math.min(price * clamp(compSpreadRatio * (0.96 + rng() * 0.06), 0.82, 1), average90d * 0.99),
-              lowest180d,
-              price
-            )
-          );
+    let otherBestPrice = null;
+    let competitorAvgPrice = price;
+    let marketBestPrice = price;
 
-    const competitorAvgPrice =
-      i === totalPoints - 1
-        ? round2(compAvgToday)
-        : round2(clamp(price * clamp(compAvgRatio * (0.97 + rng() * 0.06), 0.85, 1.25), marketFloor, highest180d * 1.08));
+    if (otherComps.length > 0) {
+      if (i === lastIdx) {
+        otherBestPrice = round2(otherTodayMin);
+        competitorAvgPrice = round2(otherTodayAvg);
+        marketBestPrice = round2(Math.min(price, allCompsTodayMin));
+      } else {
+        const wobble = (rng() - 0.5) * 0.03;
+        otherBestPrice = round2(
+          clamp(price * clamp(otherMinRatio + wobble, 0.78, 1.35), cleanLow, cleanHigh * 1.15)
+        );
+        competitorAvgPrice = round2(
+          clamp(price * clamp(otherAvgRatio + wobble, otherMinRatio, 1.45), otherBestPrice, cleanHigh * 1.2)
+        );
+        marketBestPrice = round2(Math.min(price, otherBestPrice));
+      }
+    }
 
     points.push({
       date,
       daysAgo,
       retailerPrice: price,
-      marketBestPrice: marketFloor,
+      marketBestPrice,
+      otherBestPrice,
       competitorAvgPrice,
-      movingAvg90d: round2(average90d),
+      movingAvg90d: finalAvg90,
       event
     });
   }
@@ -337,47 +399,52 @@ function build180DayPriceSeries({
 }
 
 /**
- * Summarizes 30, 90, and 180-day comparison metrics between the submitted store
- * and all competing retailers.
+ * Summarizes 30, 90, and 180-day comparison metrics directly from the reconciled `priceHistory`
+ * slices so 30d / 90d / 180d lows, highs, averages, chart points, and top ledger never contradict.
  */
 function buildWindowComparisons(priceHistory, currentPrice, sortedCompetitors) {
   const otherCompetitors = sortedCompetitors.filter((c) => !c.isTargetStore);
-  const bestCompetitorToday =
-    otherCompetitors.length > 0 ? Math.min(...otherCompetitors.map((c) => c.price)) : currentPrice;
-  const avgCompetitorToday =
-    otherCompetitors.length > 0
-      ? otherCompetitors.reduce((s, c) => s + c.price, 0) / otherCompetitors.length
-      : currentPrice;
+  const hasExternalCompetitors = otherCompetitors.length > 0;
 
   function summarize(daysLimit, label) {
     const slice = priceHistory.filter((p) => p.daysAgo <= daysLimit);
     const ownPrices = slice.map((p) => p.retailerPrice);
-    const compLows = slice.map((p) => p.marketBestPrice);
-    const compAvgs = slice.map((p) => p.competitorAvgPrice || p.marketBestPrice);
 
     const ownSellerAvg = round2(ownPrices.reduce((a, b) => a + b, 0) / Math.max(1, ownPrices.length));
     const ownSellerLow = round2(Math.min(...ownPrices));
     const ownSellerHigh = round2(Math.max(...ownPrices));
 
-    let competitorLow;
-    if (bestCompetitorToday > currentPrice) {
-      // Target store beats all other sellers: anchor competitor floor to actual competing sellers
-      const scale = daysLimit === 30 ? 0.97 : daysLimit === 90 ? 0.94 : 0.91;
-      competitorLow = round2(bestCompetitorToday * scale);
-    } else {
-      const floorFloor = bestCompetitorToday * (daysLimit === 30 ? 0.92 : daysLimit === 90 ? 0.88 : 0.85);
-      competitorLow = round2(clamp(Math.min(...compLows, bestCompetitorToday), floorFloor, bestCompetitorToday));
+    if (!hasExternalCompetitors) {
+      return {
+        days: daysLimit,
+        label,
+        hasExternalCompetitors: false,
+        ownSellerAvg,
+        ownSellerLow,
+        ownSellerHigh,
+        competitorAvg: ownSellerAvg,
+        competitorLow: ownSellerLow,
+        deltaVsOwnAvgPct: round2(((ownSellerAvg - currentPrice) / Math.max(1, ownSellerAvg)) * 100),
+        deltaVsCompetitorLow: 0
+      };
     }
 
+    const compLows = slice
+      .map((p) => p.otherBestPrice)
+      .filter((v) => typeof v === 'number' && Number.isFinite(v) && v > 0);
+    const compAvgs = slice
+      .map((p) => p.competitorAvgPrice)
+      .filter((v) => typeof v === 'number' && Number.isFinite(v) && v > 0);
+
+    const competitorLow = round2(Math.min(...compLows));
     const competitorAvg = round2(
-      otherCompetitors.length > 0
-        ? (compAvgs.reduce((a, b) => a + b, 0) / Math.max(1, compAvgs.length) + avgCompetitorToday) / 2
-        : ownSellerAvg
+      compAvgs.reduce((a, b) => a + b, 0) / Math.max(1, compAvgs.length)
     );
 
     return {
       days: daysLimit,
       label,
+      hasExternalCompetitors: true,
       ownSellerAvg,
       ownSellerLow,
       ownSellerHigh,
@@ -400,6 +467,7 @@ function buildWindowComparisons(priceHistory, currentPrice, sortedCompetitors) {
  */
 function calculateDealTruthScore(metrics) {
   const {
+    currency = 'EUR',
     currentPrice,
     claimedReferencePrice,
     average90d,
@@ -411,7 +479,6 @@ function calculateDealTruthScore(metrics) {
 
   // 1. vs 90-Day Average (0-35 pts)
   const pctVsAvg = ((average90d - currentPrice) / Math.max(1, average90d)) * 100;
-  // At 0% diff -> 17.5 pts; +20% cheaper -> 35 pts; -20% pricier -> 0 pts
   const vsAverageScore = Math.round(clamp(17.5 + pctVsAvg * 0.875, 0, 35));
 
   // 2. 180-Day Historical Range Position (0-30 pts)
@@ -420,15 +487,26 @@ function calculateDealTruthScore(metrics) {
   const historicalRangeScore = Math.round(rangeRatio * 30);
 
   // 3. Cross-Retailer Competitiveness (0-20 pts)
-  const sortedPrices = [...competitors].map((c) => c.price).sort((a, b) => a - b);
-  const minCompPrice = sortedPrices[0] || currentPrice;
-  const maxCompPrice = sortedPrices[sortedPrices.length - 1] || currentPrice;
+  const externalComps = (competitors || []).filter((c) => !c.isTargetStore);
   let crossMarketScore;
-  if (maxCompPrice === minCompPrice) {
-    crossMarketScore = 15;
+  let crossMarketDetail;
+
+  if (externalComps.length === 0) {
+    crossMarketScore = 12;
+    crossMarketDetail = 'No verified external retailer offers found for this exact SKU (neutral baseline)';
   } else {
-    const premiumOverCheapest = ((currentPrice - minCompPrice) / Math.max(1, minCompPrice)) * 100;
-    crossMarketScore = Math.round(clamp(20 - premiumOverCheapest * 0.85, 0, 20));
+    const minExternalPrice = Math.min(...externalComps.map((c) => c.price));
+    if (currentPrice <= minExternalPrice + 0.01) {
+      crossMarketScore = 20;
+      crossMarketDetail =
+        currentPrice < minExternalPrice - 0.01
+          ? `${formatCurrencyInline(minExternalPrice - currentPrice, currency)} cheaper than lowest verified competitor`
+          : 'Tied for cheapest across all verified stores';
+    } else {
+      const premiumOverCheapest = ((currentPrice - minExternalPrice) / Math.max(1, minExternalPrice)) * 100;
+      crossMarketScore = Math.round(clamp(20 - premiumOverCheapest * 0.85, 0, 20));
+      crossMarketDetail = `${formatCurrencyInline(currentPrice - minExternalPrice, currency)} above cheapest verified competitor`;
+    }
   }
 
   // 4. UVP / Discount Honesty Audit (0-15 pts)
@@ -513,10 +591,7 @@ function calculateDealTruthScore(metrics) {
         label: 'Cross-Retailer Competitiveness',
         score: crossMarketScore,
         maxScore: 20,
-        detail:
-          currentPrice <= minCompPrice + 0.01
-            ? 'Cheapest tracked online store right now'
-            : `${round2(currentPrice - minCompPrice)} above cheapest competing store`
+        detail: crossMarketDetail
       },
       {
         key: 'discountHonesty',
@@ -536,7 +611,6 @@ function pickBestProductTitle(liveTitle, webTitle, pathTitle) {
     (t) => typeof t === 'string' && t.trim().length >= 4
   );
   if (candidates.length === 0) return 'Online Store Product';
-  // Prefer verified live title if multi-word; otherwise prefer web-refined title over raw slug
   if (liveTitle && liveTitle.trim().split(/\s+/).length >= 2) {
     return sanitizeText(liveTitle, 140);
   }
@@ -547,9 +621,16 @@ function pickBestProductTitle(liveTitle, webTitle, pathTitle) {
 }
 
 /**
- * Produces the complete structured price intelligence report from URL clues, live fetch signals, web search, and benchmarks.
+ * Produces the complete structured price intelligence report from URL clues, live fetch signals,
+ * grounded market history, and live-verified competing merchant offers.
  */
-function analyzeProductPricing({ urlInfo, liveSignals, webSearch, geminiGrounded }) {
+function analyzeProductPricing({
+  urlInfo,
+  liveSignals,
+  webSearch,
+  geminiGrounded,
+  verifiedCompetitors
+}) {
   const retailer = identifyRetailer(urlInfo.hostname);
   const parsedPath = parseProductFromPath(urlInfo.pathname, retailer.id, retailer.name);
 
@@ -573,9 +654,42 @@ function analyzeProductPricing({ urlInfo, liveSignals, webSearch, geminiGrounded
     ? groundedData.currency
     : liveMeta.currency || inferCurrency(urlInfo.hostname, urlInfo.pathname);
 
+  const hasExplicitVerifiedList = Array.isArray(verifiedCompetitors);
+  const externalComps = hasExplicitVerifiedList
+    ? verifiedCompetitors.filter((c) => c && c.retailer && c.retailer.toLowerCase() !== retailer.name.toLowerCase())
+    : groundedData
+      ? groundedData.competitors
+          .filter((c) => c && c.retailer && c.retailer.toLowerCase() !== retailer.name.toLowerCase())
+          .map((c) => ({
+            ...c,
+            directProductUrl: c.url || null,
+            verifiedLive: false,
+            verificationLabel: 'DIRECT STORE'
+          }))
+      : [];
+
   let market;
   if (groundedData) {
-    const ratioBelowAvg = (groundedData.average90d - groundedData.currentPrice) / Math.max(1, groundedData.average90d);
+    const targetComp = {
+      retailer: retailer.name,
+      price: groundedData.currentPrice,
+      shipping: groundedData.currentPrice >= 49 ? 'Free Standard Shipping' : 'Standard Shipping',
+      stock: 'In Stock',
+      directProductUrl: urlInfo.normalizedUrl,
+      verifiedLive: Boolean(liveSignals && liveSignals.liveFetched),
+      verificationLabel: liveSignals && liveSignals.liveFetched ? 'VERIFIED LIVE' : 'YOUR URL'
+    };
+
+    const combinedComps = [targetComp, ...externalComps];
+    const allPrices = combinedComps.map((c) => c.price).filter((p) => Number.isFinite(p) && p > 0);
+    const minCompPrice = Math.min(...allPrices);
+
+    const lowest180d = round2(Math.min(groundedData.lowest180d, minCompPrice));
+    const highest180d = round2(Math.max(groundedData.highest180d, groundedData.currentPrice, groundedData.average90d));
+    const average90d = round2(clamp(groundedData.average90d, lowest180d, highest180d));
+    const average30d = round2(clamp(groundedData.average30d || average90d, lowest180d, highest180d));
+
+    const ratioBelowAvg = (average90d - groundedData.currentPrice) / Math.max(1, average90d);
     const derivedScenario =
       groundedData.prePromoHikeDetected
         ? 'pseudo_discount'
@@ -587,18 +701,24 @@ function analyzeProductPricing({ urlInfo, liveSignals, webSearch, geminiGrounded
               ? 'standard_retail'
               : 'price_trap';
 
+    const lowestComp = combinedComps.reduce((best, c) => (c.price < best.price ? c : best), combinedComps[0]);
+
     market = {
       currency: groundedData.currency,
       currentPrice: groundedData.currentPrice,
       claimedReferencePrice: groundedData.claimedReferencePrice,
-      average90d: groundedData.average90d,
-      lowest180d: groundedData.lowest180d,
-      lowest180dDate: groundedData.lowest180dDate,
-      lowest180dRetailer: groundedData.lowest180dRetailer,
-      highest180d: groundedData.highest180d,
+      average30d,
+      average90d,
+      lowest180d,
+      lowest180dDate:
+        groundedData.currentPrice <= lowest180d + 0.01
+          ? isoDateDaysAgo(0)
+          : groundedData.lowest180dDate,
+      lowest180dRetailer: lowestComp.price <= lowest180d + 0.01 ? lowestComp.retailer : groundedData.lowest180dRetailer,
+      highest180d,
       prePromoHikeDetected: groundedData.prePromoHikeDetected,
       scenario: derivedScenario,
-      competitors: groundedData.competitors
+      competitors: combinedComps
     };
   } else {
     market = synthesizeMarketProfile({
@@ -609,21 +729,36 @@ function analyzeProductPricing({ urlInfo, liveSignals, webSearch, geminiGrounded
       currency,
       livePrice: liveMeta.price,
       liveReferencePrice: liveMeta.referencePrice,
-      webSearch
+      webSearch,
+      externalCompetitors: externalComps,
+      targetNormalizedUrl: urlInfo.normalizedUrl,
+      targetLiveFetched: Boolean(liveSignals && liveSignals.liveFetched)
     });
   }
 
-  const scoring = calculateDealTruthScore(market);
   const priceHistory = build180DayPriceSeries({
     seedKey: `${urlInfo.hostname}${urlInfo.pathname}`,
     currentPrice: market.currentPrice,
+    average30d: market.average30d,
     average90d: market.average90d,
     lowest180d: market.lowest180d,
+    lowest180dDate: market.lowest180dDate,
     highest180d: market.highest180d,
     prePromoHikeDetected: market.prePromoHikeDetected,
     scenario: market.scenario,
-    competitors: market.competitors
+    competitors: market.competitors.map((c) => ({
+      ...c,
+      isTargetStore: c.retailer.toLowerCase() === retailer.name.toLowerCase()
+    }))
   });
+
+  // Sync reconciled actual 90d avg & exact lowest point date from built series
+  const lastPoint = priceHistory[priceHistory.length - 1];
+  const lowPoint = priceHistory.find((p) => p.event === '180-Day Market Low') || priceHistory[0];
+  const reconciledAvg90 = lastPoint ? lastPoint.movingAvg90d : market.average90d;
+  const reconciledLow180 = round2(Math.min(...priceHistory.map((p) => p.retailerPrice), ...market.competitors.map((c) => c.price)));
+  const reconciledHigh180 = round2(Math.max(...priceHistory.map((p) => p.retailerPrice)));
+  const reconciledLowDate = lowPoint ? lowPoint.date : market.lowest180dDate;
 
   const sortedCompetitors = enrichCompetitorsWithLinks(
     [...market.competitors]
@@ -643,9 +778,20 @@ function analyzeProductPricing({ urlInfo, liveSignals, webSearch, geminiGrounded
     }
   );
 
+  const scoring = calculateDealTruthScore({
+    currency: market.currency,
+    currentPrice: market.currentPrice,
+    claimedReferencePrice: market.claimedReferencePrice,
+    average90d: reconciledAvg90,
+    lowest180d: reconciledLow180,
+    highest180d: reconciledHigh180,
+    prePromoHikeDetected: market.prePromoHikeDetected,
+    competitors: sortedCompetitors
+  });
+
   const windowComparisons = buildWindowComparisons(priceHistory, market.currentPrice, sortedCompetitors);
   const bestAlternative = sortedCompetitors[0];
-  const realDeltaVsAvg = round2(market.average90d - market.currentPrice);
+  const realDeltaVsAvg = round2(reconciledAvg90 - market.currentPrice);
 
   return {
     product: {
@@ -663,12 +809,12 @@ function analyzeProductPricing({ urlInfo, liveSignals, webSearch, geminiGrounded
       currency: market.currency,
       currentPrice: market.currentPrice,
       claimedReferencePrice: market.claimedReferencePrice,
-      average90d: market.average90d,
-      lowest180d: market.lowest180d,
-      lowest180dDate: market.lowest180dDate,
+      average90d: reconciledAvg90,
+      lowest180d: reconciledLow180,
+      lowest180dDate: reconciledLowDate,
       lowest180dRetailer: market.lowest180dRetailer,
-      highest180d: market.highest180d,
-      fairPriceEstimate: round2((market.average90d * 0.7 + market.lowest180d * 0.3)),
+      highest180d: reconciledHigh180,
+      fairPriceEstimate: round2(reconciledAvg90 * 0.7 + reconciledLow180 * 0.3),
       realDeltaVsAvg,
       prePromoHikeDetected: market.prePromoHikeDetected,
       windowComparisons
@@ -689,6 +835,8 @@ function analyzeProductPricing({ urlInfo, liveSignals, webSearch, geminiGrounded
       webSearchNote: (webSearch && (webSearch.sourceNote || webSearch.reason)) || null,
       geminiGroundedUsed: Boolean(groundedData),
       geminiGroundingSources: groundedData && geminiGrounded.groundingSources ? geminiGrounded.groundingSources : [],
+      verifiedExternalCompetitorsCount: externalComps.length,
+      liveVerifiedExternalCompetitorsCount: externalComps.filter((c) => c.verifiedLive).length,
       matchedBenchmarkPreset: false,
       scenario: market.scenario
     }
@@ -698,6 +846,6 @@ function analyzeProductPricing({ urlInfo, liveSignals, webSearch, geminiGrounded
 module.exports = {
   analyzeProductPricing,
   build180DayPriceSeries,
+  buildWindowComparisons,
   calculateDealTruthScore
 };
-

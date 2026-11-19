@@ -508,8 +508,8 @@ function createAppServer(options = {}) {
     }
   });
 
-  // Harden socket timeouts against Slowloris while allowing grounded live search completion
-  server.requestTimeout = 25_000;
+  // Harden socket timeouts against Slowloris while allowing multi-store live verification completion
+  server.requestTimeout = 45_000;
   server.headersTimeout = 5_000;
   server.keepAliveTimeout = 5_000;
 

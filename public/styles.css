@@ -972,6 +972,12 @@ body {
   color: #ffffff;
 }
 
+.badge-mini-verified {
+  background: var(--brand-cobalt);
+  border-color: var(--brand-cobalt);
+  color: #ffffff;
+}
+
 .offer-link-btn {
   display: inline-block;
   border: 1.5px solid var(--border);

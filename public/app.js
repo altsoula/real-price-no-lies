@@ -450,13 +450,17 @@
 
         const compLine = document.createElement('div');
         compLine.className = 'window-metric window-metric-comp mono';
-        const diffComp =
-          w.deltaVsCompetitorLow < -0.01
-            ? `Cheaper by ${formatMoney(Math.abs(w.deltaVsCompetitorLow), c)}`
-            : w.deltaVsCompetitorLow <= 0.01
-              ? 'Cheapest or tied'
-              : `+${formatMoney(w.deltaVsCompetitorLow, c)} above best`;
-        compLine.textContent = `Competitors: Low ${formatMoney(w.competitorLow, c)} · Avg ${formatMoney(w.competitorAvg, c)} (${diffComp})`;
+        if (w.hasExternalCompetitors === false) {
+          compLine.textContent = 'Competitors: No verified external offers for this exact SKU';
+        } else {
+          const diffComp =
+            w.deltaVsCompetitorLow < -0.01
+              ? `Cheaper by ${formatMoney(Math.abs(w.deltaVsCompetitorLow), c)}`
+              : w.deltaVsCompetitorLow <= 0.01
+                ? 'Cheapest or tied'
+                : `+${formatMoney(w.deltaVsCompetitorLow, c)} above best`;
+          compLine.textContent = `Competitors: Low ${formatMoney(w.competitorLow, c)} · Avg ${formatMoney(w.competitorAvg, c)} (${diffComp})`;
+        }
 
         card.append(head, ownLine, compLine);
         winContainer.appendChild(card);
@@ -483,6 +487,11 @@
         badge.className = 'badge-mini';
         badge.textContent = 'YOUR URL';
         tdStore.appendChild(badge);
+      } else if (comp.verificationLabel) {
+        const vBadge = document.createElement('span');
+        vBadge.className = comp.verifiedLive ? 'badge-mini badge-mini-verified' : 'badge-mini';
+        vBadge.textContent = comp.verificationLabel;
+        tdStore.appendChild(vBadge);
       }
 
       const tdPrice = document.createElement('td');
@@ -509,7 +518,7 @@
         offerLink.target = '_blank';
         offerLink.rel = comp.isAffiliate ? 'sponsored noopener noreferrer' : 'noopener noreferrer';
         offerLink.className = 'offer-link-btn mono';
-        offerLink.textContent = comp.isTargetStore ? 'View Store ↗' : 'Check Offer ↗';
+        offerLink.textContent = comp.isTargetStore ? 'View Store ↗' : comp.directProductUrl ? 'Direct Offer ↗' : 'Check Offer ↗';
         tdOffer.appendChild(offerLink);
       } else {
         tdOffer.textContent = '-';
@@ -518,6 +527,15 @@
       tr.append(tdStore, tdPrice, tdDelta, tdShip, tdOffer);
       compBody.appendChild(tr);
     });
+    if (competitors.length <= 1) {
+      const infoTr = document.createElement('tr');
+      const infoTd = document.createElement('td');
+      infoTd.colSpan = 5;
+      infoTd.className = 'mono';
+      infoTd.textContent = 'No verified identical competing retailer offers matched this exact SKU right now (exclusive or unindexed item).';
+      infoTr.appendChild(infoTd);
+      compBody.appendChild(infoTr);
+    }
 
     // AI Findings & Tactics
     document.getElementById('res-ai-headline').textContent = aiAnalysis.headline;

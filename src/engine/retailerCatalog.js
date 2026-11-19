@@ -117,8 +117,388 @@ const RETAILER_PROFILES = [
     hosts: ['apple.com'],
     defaultCategory: 'Computing & Consumer Electronics',
     tactics: ['Zero direct retail discounts (strict MSRP)', 'Typically 10-18% pricier than authorized third-party street prices']
+  },
+  {
+    id: 'digitec',
+    name: 'Digitec',
+    hosts: ['digitec.ch'],
+    defaultCategory: 'Computing & Consumer Electronics',
+    tactics: ['Transparent Swiss market pricing', 'Daily dynamic competitor repricing']
+  },
+  {
+    id: 'alternate',
+    name: 'Alternate',
+    hosts: ['alternate.de', 'alternate.nl', 'alternate.at', 'alternate.be'],
+    defaultCategory: 'Computing & Gaming',
+    tactics: ['Daily ZackZack flash promotions', 'Component bundle pricing']
+  },
+  {
+    id: 'mindfactory',
+    name: 'Mindfactory',
+    hosts: ['mindfactory.de'],
+    defaultCategory: 'Computing & Gaming',
+    tactics: ['Midnight-shopping shipping waivers', 'Mindstar limited hardware drops']
+  },
+  {
+    id: 'expert',
+    name: 'Expert',
+    hosts: ['expert.de', 'expert.at'],
+    defaultCategory: 'Consumer Electronics & Appliances',
+    tactics: ['Regional franchise price variation', 'Weekly flyer promos vs. online market street price']
+  },
+  {
+    id: 'euronics',
+    name: 'Euronics',
+    hosts: ['euronics.de', 'euronics.at'],
+    defaultCategory: 'Consumer Electronics & Appliances',
+    tactics: ['Independent regional dealer pricing', 'Seasonal promotional rebates']
+  },
+  {
+    id: 'conrad',
+    name: 'Conrad',
+    hosts: ['conrad.de', 'conrad.at', 'conrad.com'],
+    defaultCategory: 'Consumer Electronics & Tech',
+    tactics: ['List MSRP baseline with voucher campaigns', 'Higher margin on accessories vs. main hardware']
+  },
+  {
+    id: 'kaufland',
+    name: 'Kaufland',
+    hosts: ['kaufland.de'],
+    defaultCategory: 'General E-Commerce Marketplace',
+    tactics: ['Aggressive third-party marketplace price undercutting', 'Frequent coupon promos']
+  },
+  {
+    id: 'lidl',
+    name: 'Lidl',
+    hosts: ['lidl.de', 'lidl.co.uk'],
+    defaultCategory: 'Home, Kitchen & General Retail',
+    tactics: ['Lidl Plus app rebates', 'High-velocity weekly online clearance drops']
+  },
+  {
+    id: 'tchibo',
+    name: 'Tchibo',
+    hosts: ['tchibo.de', 'tchibo.at'],
+    defaultCategory: 'Coffee, Home & Apparel',
+    tactics: ['Rotating weekly thematic collections', 'Member card sale windows']
+  },
+  {
+    id: 'bauhaus',
+    name: 'Bauhaus',
+    hosts: ['bauhaus.info', 'bauhaus.at'],
+    defaultCategory: 'Home Improvement & Garden',
+    tactics: ['Best-price guarantee matching local competitors', 'High seasonal price stability']
+  },
+  {
+    id: 'obi',
+    name: 'OBI',
+    hosts: ['obi.de', 'obi.at'],
+    defaultCategory: 'Home Improvement & Garden',
+    tactics: ['HEY OBI app percentage coupons', 'Occasional UVP anchoring on power tools']
+  },
+  {
+    id: 'home24',
+    name: 'Home24',
+    hosts: ['home24.de', 'home24.at', 'home24.ch'],
+    defaultCategory: 'Home & Furniture',
+    tactics: ['Recurring sitewide voucher codes', 'Inflated RRP reference badges']
+  },
+  {
+    id: 'wayfair',
+    name: 'Wayfair',
+    hosts: ['wayfair.de', 'wayfair.co.uk', 'wayfair.com'],
+    defaultCategory: 'Home & Furniture',
+    tactics: ['White-label rebranding of identical furniture SKUs', 'Constant flash-sale countdown timers']
+  },
+  {
+    id: 'breuninger',
+    name: 'Breuninger',
+    hosts: ['breuninger.com'],
+    defaultCategory: 'Apparel & Premium Fashion',
+    tactics: ['End-of-season designer markdowns', 'Strict RRP outside sale windows']
+  },
+  {
+    id: 'snipes',
+    name: 'Snipes',
+    hosts: ['snipes.com'],
+    defaultCategory: 'Apparel & Footwear',
+    tactics: ['Limited sneaker restocks', 'App-exclusive flash sales']
+  },
+  {
+    id: 'decathlon',
+    name: 'Decathlon',
+    hosts: ['decathlon.de', 'decathlon.co.uk', 'decathlon.com', 'decathlon.fr'],
+    defaultCategory: 'Sports & Outdoor',
+    tactics: ['Uniform low-margin house-brand pricing', 'Third-party marketplace price variance']
+  },
+  {
+    id: 'douglas',
+    name: 'Douglas',
+    hosts: ['douglas.de', 'douglas.at'],
+    defaultCategory: 'Beauty & Personal Care',
+    tactics: ['Online app 20% off vouchers vs. higher storefront shelf prices', 'Gift-with-purchase promotions']
+  },
+  {
+    id: 'dm',
+    name: 'dm',
+    hosts: ['dm.de', 'dm.at'],
+    defaultCategory: 'Drugstore & Personal Care',
+    tactics: ['Always-low uniform everyday pricing', 'Payback point multipliers']
+  },
+  {
+    id: 'rossmann',
+    name: 'Rossmann',
+    hosts: ['rossmann.de'],
+    defaultCategory: 'Drugstore & Personal Care',
+    tactics: ['10% app coupon windows', 'Frequent weekly drugstore flyers']
+  },
+  {
+    id: 'thalia',
+    name: 'Thalia',
+    hosts: ['thalia.de', 'thalia.at'],
+    defaultCategory: 'Books, Toys & Electronics',
+    tactics: ['Fixed book pricing alongside competitive toy/e-reader rebates', '15% subscriber coupon drops']
+  },
+  {
+    id: 'samsung',
+    name: 'Samsung',
+    hosts: ['samsung.com'],
+    defaultCategory: 'Computing & Consumer Electronics',
+    tactics: ['Trade-in credits masking higher cash price', 'Members-only educational/corporate store pricing']
+  },
+  {
+    id: 'sony',
+    name: 'Sony',
+    hosts: ['sony.de', 'sony.eu', 'sony.com', 'sony.co.uk'],
+    defaultCategory: 'Consumer Electronics & Audio',
+    tactics: ['Official MSRP baseline', 'Occasional manufacturer cashback rebates']
+  },
+  {
+    id: 'dyson',
+    name: 'Dyson',
+    hosts: ['dyson.de', 'dyson.co.uk', 'dyson.com'],
+    defaultCategory: 'Home Appliances',
+    tactics: ['Direct-to-consumer bundle accessories at MSRP', 'Rare seasonal cash markdowns']
+  },
+  {
+    id: 'bosch',
+    name: 'Bosch',
+    hosts: ['bosch-home.com', 'bosch-diy.com'],
+    defaultCategory: 'Home & Kitchen Appliances',
+    tactics: ['Manufacturer RRP showcase vs. significantly cheaper retail partners']
+  },
+  {
+    id: 'tefal',
+    name: 'Tefal',
+    hosts: ['tefal.de', 'tefal.com', 'tefal.co.uk'],
+    defaultCategory: 'Cookware & Kitchen Appliances',
+    tactics: ['High UVP anchoring paired with steep authorized retailer discounts']
+  },
+  {
+    id: 'braun',
+    name: 'Braun',
+    hosts: ['braun.de', 'braun.com'],
+    defaultCategory: 'Personal Care Appliances',
+    tactics: ['High UVP list pricing vs. 35-50% street discounts at Amazon/MediaMarkt']
+  },
+  {
+    id: 'philips',
+    name: 'Philips',
+    hosts: ['philips.de', 'philips.com', 'philips.co.uk'],
+    defaultCategory: 'Consumer Electronics & Personal Care',
+    tactics: ['Manufacturer cashback promos', 'Seasonal holiday bundles']
+  },
+  {
+    id: 'nike',
+    name: 'Nike Official',
+    hosts: ['nike.com'],
+    defaultCategory: 'Apparel & Footwear',
+    tactics: ['Member-only promo codes', 'Full MSRP for 90 days post-launch']
+  },
+  {
+    id: 'adidas',
+    name: 'Adidas',
+    hosts: ['adidas.de', 'adidas.com', 'adidas.co.uk'],
+    defaultCategory: 'Apparel & Footwear',
+    tactics: ['adiClub member markdown windows', 'Factory outlet price tiers']
+  },
+  {
+    id: 'bestbuy',
+    name: 'Best Buy',
+    hosts: ['bestbuy.com'],
+    defaultCategory: 'Consumer Electronics & Appliances',
+    tactics: ['Weekly Member Deals & My Best Buy price matching']
+  },
+  {
+    id: 'walmart',
+    name: 'Walmart',
+    hosts: ['walmart.com'],
+    defaultCategory: 'General E-Commerce Retail',
+    tactics: ['Rollback promo tags vs. third-party Marketplace variance']
+  },
+  {
+    id: 'target',
+    name: 'Target',
+    hosts: ['target.com'],
+    defaultCategory: 'General E-Commerce Retail',
+    tactics: ['Target Circle percentage offers', 'Consistent MSRP matching']
+  },
+  {
+    id: 'currys',
+    name: 'Currys',
+    hosts: ['currys.co.uk'],
+    defaultCategory: 'Consumer Electronics & Appliances',
+    tactics: ['UK Price Promise matching', 'Bank Holiday promo sales']
+  },
+  {
+    id: 'argos',
+    name: 'Argos',
+    hosts: ['argos.co.uk'],
+    defaultCategory: 'General E-Commerce Retail',
+    tactics: ['Multi-buy promo codes', 'Weekend Red Tag clearance']
+  },
+  {
+    id: 'johnlewis',
+    name: 'John Lewis',
+    hosts: ['johnlewis.com'],
+    defaultCategory: 'Department & Electronics Retail',
+    tactics: ['Extended hardware guarantees included at MSRP', 'Seasonal clearance markdowns']
+  },
+  {
+    id: 'fnac',
+    name: 'Fnac',
+    hosts: ['fnac.com'],
+    defaultCategory: 'Consumer Electronics & Books',
+    tactics: ['Fnac+ member voucher rebates', 'Marketplace third-party pricing']
+  },
+  {
+    id: 'darty',
+    name: 'Darty',
+    hosts: ['darty.com'],
+    defaultCategory: 'Consumer Electronics & Appliances',
+    tactics: ['Flash promo vouchers', 'Store pickup parity with Fnac']
+  },
+  {
+    id: 'bol',
+    name: 'Bol.com',
+    hosts: ['bol.com'],
+    defaultCategory: 'General E-Commerce Marketplace',
+    tactics: ['Select member deals', 'Third-party partner seller price spread']
+  },
+  {
+    id: 'proshop',
+    name: 'Proshop',
+    hosts: ['proshop.de', 'proshop.dk', 'proshop.nl', 'proshop.at'],
+    defaultCategory: 'Computing & Consumer Electronics',
+    tactics: ['Competitive Nordic-EU hardware pricing', 'Flash weekend electronics offers']
+  },
+  {
+    id: 'alza',
+    name: 'Alza',
+    hosts: ['alza.de', 'alza.at', 'alza.cz'],
+    defaultCategory: 'Computing & Consumer Electronics',
+    tactics: ['Transparent multi-tier member & promo coupon pricing']
   }
 ];
+
+/**
+ * Aggregators, review blogs, forums, social platforms, and ultra-low-trust marketplaces
+ * that MUST NEVER be surfaced as direct competing retail sellers.
+ */
+const AGGREGATOR_AND_NON_RETAIL_HOSTS = [
+  'idealo.de',
+  'idealo.at',
+  'idealo.co.uk',
+  'idealo.fr',
+  'idealo.es',
+  'idealo.it',
+  'geizhals.de',
+  'geizhals.at',
+  'geizhals.eu',
+  'billiger.de',
+  'guenstiger.de',
+  'check24.de',
+  'keepa.com',
+  'camelcamelcamel.com',
+  'heise.de',
+  'pricerunner.com',
+  'pricerunner.co.uk',
+  'pricerunner.se',
+  'pricerunner.dk',
+  'kelkoo.de',
+  'kelkoo.com',
+  'kelkoo.co.uk',
+  'preissuchmaschine.de',
+  'ladenzeile.de',
+  'preis.de',
+  'google.com',
+  'google.de',
+  'google.co.uk',
+  'bing.com',
+  'duckduckgo.com',
+  'mydealz.de',
+  'dealabs.com',
+  'hotukdeals.com',
+  'slickdeals.net',
+  'reddit.com',
+  'youtube.com',
+  'youtu.be',
+  'chip.de',
+  'computerbild.de',
+  'test.de',
+  'hifi.de',
+  'notebookcheck.com',
+  'notebookcheck.net',
+  'rtings.com',
+  'techradar.com',
+  'tomsguide.com',
+  'trustpilot.com',
+  'wikipedia.org',
+  'kleinanzeigen.de',
+  'temu.com',
+  'aliexpress.com',
+  'wish.com',
+  'dhgate.com',
+  'ebay-kleinanzeigen.de',
+  'preisvergleich.de'
+];
+
+function hostMatchesDomainList(hostname, domainList) {
+  const lower = String(hostname || '').toLowerCase().trim();
+  if (!lower) return false;
+  return domainList.some((dom) => lower === dom || lower.endsWith(`.${dom}`));
+}
+
+function isAggregatorOrNonRetailHost(hostname) {
+  return hostMatchesDomainList(hostname, AGGREGATOR_AND_NON_RETAIL_HOSTS);
+}
+
+function isReputableRetailerHost(hostname) {
+  const lower = String(hostname || '').toLowerCase().trim();
+  if (!lower || isAggregatorOrNonRetailHost(lower)) return false;
+  return RETAILER_PROFILES.some((profile) => hostMatchesDomainList(lower, profile.hosts));
+}
+
+function resolveReputableRetailerName(rawName) {
+  const cleaned = String(rawName || '').toLowerCase().trim();
+  if (!cleaned) return null;
+  if (isAggregatorOrNonRetailHost(cleaned)) return null;
+  const compact = cleaned.replace(/[^a-z0-9]/g, '');
+  for (const profile of RETAILER_PROFILES) {
+    const profNameCompact = profile.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (
+      cleaned === profile.id ||
+      compact === profNameCompact ||
+      profile.hosts.some((h) => cleaned === h || cleaned.startsWith(`${profile.id}.`))
+    ) {
+      return profile.name;
+    }
+  }
+  return null;
+}
+
+function isReputableRetailerName(rawName) {
+  return resolveReputableRetailerName(rawName) !== null;
+}
 
 /**
  * Curated benchmark product presets across the 7 flagship stores so users can
@@ -414,6 +794,12 @@ function parseProductFromPath(pathname, retailerId, retailerName) {
     if (hmMatch) sku = hmMatch[1];
   }
 
+  // Zalando article SKU (e.g. ad115o03m-a11.html)
+  if (!sku && retailerId === 'zalando') {
+    const zalandoMatch = pathname.match(/-([a-z0-9]{7,12}-[a-z0-9]{2,4})\.html(?:$|\/)/i);
+    if (zalandoMatch) sku = zalandoMatch[1].toUpperCase();
+  }
+
   // Generic numeric/alphanumeric product ID near end of slug
   if (!sku) {
     const numIdMatch = pathname.match(/[-_](\d{6,12})(?:\.html|\/|$)/);
@@ -535,12 +921,17 @@ function findMatchingPreset(normalizedUrl) {
 }
 
 module.exports = {
+  AGGREGATOR_AND_NON_RETAIL_HOSTS,
   PRESET_BENCHMARKS,
   RETAILER_PROFILES,
   findMatchingPreset,
   identifyRetailer,
   inferCategory,
   inferCurrency,
-  parseProductFromPath
+  isAggregatorOrNonRetailHost,
+  isReputableRetailerHost,
+  isReputableRetailerName,
+  parseProductFromPath,
+  resolveReputableRetailerName
 };
 

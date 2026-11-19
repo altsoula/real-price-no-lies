@@ -2,8 +2,26 @@
 
 const { parseLocalizedPrice } = require('../security/urlGuard');
 const { sanitizeText } = require('../security/sanitizer');
+const { isAggregatorOrNonRetailHost, isReputableRetailerHost } = require('./retailerCatalog');
 
-const SEARCH_TIMEOUT_MS = 3200;
+const SEARCH_TIMEOUT_MS = 3500;
+
+function extractDuckDuckGoDestUrl(rawHref) {
+  if (typeof rawHref !== 'string' || !rawHref.trim()) return null;
+  let href = rawHref.trim();
+  if (href.startsWith('//')) href = `https:${href}`;
+  try {
+    const parsed = new URL(href, 'https://html.duckduckgo.com');
+    const uddg = parsed.searchParams.get('uddg');
+    const target = uddg || parsed.toString();
+    const finalParsed = new URL(target);
+    if (finalParsed.protocol !== 'https:' && finalParsed.protocol !== 'http:') return null;
+    if (finalParsed.hostname.includes('duckduckgo.com')) return null;
+    return finalParsed.toString();
+  } catch {
+    return null;
+  }
+}
 
 function decodeHtmlEntities(str) {
   return str
@@ -177,28 +195,41 @@ async function runSingleDuckDuckGoQuery(query, currency, titleWords, modelToken,
     }
 
     const html = await res.text();
-    const titles = [...html.matchAll(/class="result__a"[^>]*>([\s\S]*?)<\/a>/gi)].map((m) =>
-      sanitizeText(decodeHtmlEntities(m[1].replace(/<[^>]+>/g, ' ')), 180)
+    const anchorMatches = [...html.matchAll(/<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)];
+    const titles = anchorMatches.map((m) =>
+      sanitizeText(decodeHtmlEntities(m[2].replace(/<[^>]+>/g, ' ')), 180)
     );
+    const urls = anchorMatches.map((m) => extractDuckDuckGoDestUrl(decodeHtmlEntities(m[1])));
     const snippets = [...html.matchAll(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi)].map((m) =>
       sanitizeText(decodeHtmlEntities(m[1].replace(/<[^>]+>/g, ' ')), 350)
     );
 
     const extracted = [];
+    const candidateOffers = [];
     const maxLen = Math.max(titles.length, snippets.length);
     for (let i = 0; i < maxLen; i += 1) {
       const t = titles[i] || '';
       const s = snippets[i] || '';
+      const u = urls[i] || null;
       const combined = `${t} ${s}`;
       if (!hasRelevantKeywordOverlap(combined, titleWords, modelToken, sku)) {
         continue;
       }
-      extracted.push(...extractPricesFromText(combined, currency));
+      const pricesHere = extractPricesFromText(combined, currency);
+      extracted.push(...pricesHere);
+      if (u) {
+        candidateOffers.push({
+          url: u,
+          title: t,
+          hintPrice: pricesHere[0] ? pricesHere[0].normalizedPrice : null
+        });
+      }
     }
 
     return {
       ok: true,
       extracted,
+      candidateOffers,
       refinedTitle: pickRefinedTitle(titles, title, brand)
     };
   } catch (err) {
@@ -291,12 +322,63 @@ async function searchWebForProductPrice({
     highestObserved: Number(highestObserved.toFixed(2)),
     sampleCount: finalPrices.length,
     samplePrices: finalPrices.slice(0, 8),
+    candidateOffers: (first.candidateOffers || []).slice(0, 8),
     sourceNote: `Discovered ${finalPrices.length} live web price point(s) via public search index (${finalPrices.slice(0, 4).map((p) => `${p.toFixed(2)} ${currency}`).join(', ')})`
   };
 }
 
+/**
+ * Discovers real reputable retailer product page URLs on DuckDuckGo HTML for cross-shop verification.
+ */
+async function discoverCompetitorUrlsFromSearch({
+  title,
+  brand,
+  sku,
+  currency = 'EUR',
+  targetHostname = ''
+}) {
+  const cleanWords = sanitizeText(title, 100)
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !['the', 'and', 'for', 'with', 'silver', 'black', 'white', 'schwarz', 'silber'].includes(w));
+  const titleWords = cleanWords.slice(0, 5);
+  const modelToken = extractModelToken(title);
+  const coreTerms = modelToken
+    ? `${brand ? `${brand} ` : ''}"${modelToken}"`.trim()
+    : `${brand ? `${brand} ` : ''}${titleWords.slice(0, 4).join(' ')}`.trim();
+  if (!coreTerms) return [];
+
+  const targetRoot = String(targetHostname || '').toLowerCase().replace(/^www2?\./, '');
+  const siteFilter =
+    currency === 'USD'
+      ? '(site:amazon.com OR site:bestbuy.com OR site:walmart.com OR site:target.com)'
+      : currency === 'GBP'
+        ? '(site:amazon.co.uk OR site:currys.co.uk OR site:argos.co.uk OR site:johnlewis.com)'
+        : '(site:mediamarkt.de OR site:saturn.de OR site:galaxus.de OR site:coolblue.de OR site:otto.de OR site:cyberport.de OR site:amazon.de OR site:zalando.de)';
+
+  const query = `${coreTerms} ${siteFilter}`;
+  const res = await runSingleDuckDuckGoQuery(query, currency, titleWords, modelToken, sku, brand, title);
+  const seen = new Set();
+  const out = [];
+  for (const item of res.candidateOffers || []) {
+    try {
+      const host = new URL(item.url).hostname.toLowerCase().replace(/^www2?\./, '');
+      if (host === targetRoot) continue;
+      if (isAggregatorOrNonRetailHost(host) || !isReputableRetailerHost(host)) continue;
+      if (seen.has(item.url.toLowerCase())) continue;
+      seen.add(item.url.toLowerCase());
+      out.push(item);
+    } catch {
+      continue;
+    }
+  }
+  return out.slice(0, 8);
+}
+
 module.exports = {
   buildSearchQuery,
+  discoverCompetitorUrlsFromSearch,
+  extractDuckDuckGoDestUrl,
   extractPricesFromText,
   searchWebForProductPrice
 };

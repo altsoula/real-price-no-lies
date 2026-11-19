@@ -3,8 +3,9 @@
 const { loadLocalEnv } = require('../config/env');
 const { validateAndNormalizeProductUrl, safeFetchProductSignals } = require('../security/urlGuard');
 const { identifyRetailer, inferCategory, inferCurrency, parseProductFromPath } = require('./retailerCatalog');
-const { searchWebForProductPrice } = require('./webPriceSearch');
+const { searchWebForProductPrice, discoverCompetitorUrlsFromSearch } = require('./webPriceSearch');
 const { runGeminiGroundedProductResearch } = require('./geminiGroundedSearch');
+const { verifyCompetitorOffers } = require('./competitorVerifier');
 const { analyzeProductPricing } = require('./priceIntelligence');
 const { createAnalysisCache } = require('./analysisCache');
 const { createConcurrencyQueue } = require('../security/concurrencyQueue');
@@ -20,7 +21,7 @@ const analysisCache = createAnalysisCache({
 const globalAnalysisQueue = createConcurrencyQueue({
   maxConcurrent: Number(process.env.MAX_CONCURRENT_ANALYSES) || 15,
   maxQueueSize: 250,
-  queueTimeoutMs: 18_000
+  queueTimeoutMs: 35_000
 });
 
 const AI_ACCURACY_DISCLAIMER =
@@ -136,9 +137,14 @@ function buildIntelSources(urlInfo, report, engineMode) {
       weight: 'Street Price Anchor'
     },
     {
-      source: '4. 180-Day Historical Curve & Cross-Retailer Matrix',
-      method: `Evaluated 26 weekly checkpoints (${report.priceHistory[0].date} to ${report.priceHistory[report.priceHistory.length - 1].date}) across ${report.competitors.length} retailers (${report.competitors.map((c) => c.retailer).join(', ')}).`,
-      status: report.meta.matchedBenchmarkPreset ? 'CURATED BENCHMARK' : report.meta.geminiGroundedUsed ? 'GROUNDED MATRIX' : 'ANCHORED CURVE',
+      source: '4. Live Multi-Store Page Verification & 180-Day Curve',
+      method: `Evaluated 26 checkpoints (${report.priceHistory[0].date} to ${report.priceHistory[report.priceHistory.length - 1].date}); live-visited ${report.meta.liveVerifiedExternalCompetitorsCount || 0} of ${report.meta.verifiedExternalCompetitorsCount || 0} external store product pages cleanly (${report.competitors.map((c) => c.retailer).join(', ')}).`,
+      status:
+        (report.meta.liveVerifiedExternalCompetitorsCount || 0) > 0
+          ? 'LIVE MULTI-STORE VERIFIED'
+          : report.meta.geminiGroundedUsed
+            ? 'GROUNDED MATRIX'
+            : 'ANCHORED CURVE',
       weight: '85% of Score'
     },
     {
@@ -205,7 +211,51 @@ async function executeUncachedAnalysis(urlInfo, options) {
     });
   }
 
-  const report = analyzeProductPricing({ urlInfo, liveSignals, webSearch, geminiGrounded });
+  const effectiveTitle = (geminiGrounded.found && geminiGrounded.data.title) || (webSearch && webSearch.refinedTitle) || prelimTitle;
+  const effectiveBrand = (geminiGrounded.found && geminiGrounded.data.brand) || prelimBrand;
+  const effectivePrice =
+    (liveSignals.metadata && liveSignals.metadata.price) ||
+    (geminiGrounded.found && geminiGrounded.data.currentPrice) ||
+    (webSearch && webSearch.found && webSearch.currentPrice) ||
+    null;
+
+  let ddgCandidates = (webSearch && webSearch.candidateOffers) || [];
+  const groundingChunks = Array.isArray(geminiGrounded.groundingChunks) ? geminiGrounded.groundingChunks : [];
+
+  if (options.enableWebSearch !== false && (!geminiGrounded.found || groundingChunks.length === 0)) {
+    const discovered = await discoverCompetitorUrlsFromSearch({
+      title: effectiveTitle,
+      brand: effectiveBrand,
+      sku: parsedPath.sku,
+      currency,
+      targetHostname: urlInfo.hostname
+    });
+    ddgCandidates = [...ddgCandidates, ...discovered];
+  }
+
+  const verifiedCompetitors =
+    options.enableCompetitorVerification === false
+      ? []
+      : await verifyCompetitorOffers({
+          targetTitle: effectiveTitle,
+          targetBrand: effectiveBrand,
+          targetSku: parsedPath.sku,
+          targetRetailerName: retailer.name,
+          targetHostname: urlInfo.hostname,
+          targetPrice: effectivePrice,
+          currency,
+          groundingChunks,
+          geminiCompetitors: (geminiGrounded.found && geminiGrounded.data.competitors) || [],
+          ddgCandidates
+        });
+
+  const report = analyzeProductPricing({
+    urlInfo,
+    liveSignals,
+    webSearch,
+    geminiGrounded,
+    verifiedCompetitors
+  });
 
   const narrative =
     geminiGrounded.found && geminiGrounded.data.findings.length >= 2
@@ -240,9 +290,11 @@ async function executeUncachedAnalysis(urlInfo, options) {
  * @param {string} rawUrl
  * @param {{ enableWebSearch?: boolean, enableGemini?: boolean, bypassCache?: boolean, queue?: ReturnType<typeof createConcurrencyQueue>, workRunner?: Function }} [options]
  */
+const CACHE_SCHEMA_VERSION = 'v2';
+
 async function runDeepDealAnalysis(rawUrl, options = {}) {
   const urlInfo = await validateAndNormalizeProductUrl(rawUrl, { resolveDns: true });
-  const cacheKey = urlInfo.normalizedUrl.toLowerCase();
+  const cacheKey = `${CACHE_SCHEMA_VERSION}:${urlInfo.normalizedUrl.toLowerCase()}`;
 
   if (!options.bypassCache) {
     const cached = await analysisCache.getAsync(cacheKey);

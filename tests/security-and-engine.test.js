@@ -15,14 +15,25 @@ const {
 const { escapeHtml, hasPrototypePollution } = require('../src/security/sanitizer');
 const { buildCspHeader } = require('../src/security/headers');
 const { getClientIp, createRateLimiter } = require('../src/security/rateLimiter');
-const { PRESET_BENCHMARKS } = require('../src/engine/retailerCatalog');
-const { extractJsonObject, normalizeGroundedData } = require('../src/engine/geminiGroundedSearch');
+const {
+  PRESET_BENCHMARKS,
+  isAggregatorOrNonRetailHost,
+  isReputableRetailerHost,
+  parseProductFromPath
+} = require('../src/engine/retailerCatalog');
+const {
+  buildCleanSearchProductName,
+  extractJsonObject,
+  extractStorePricesFromProse,
+  normalizeGroundedData
+} = require('../src/engine/geminiGroundedSearch');
 const { createConcurrencyQueue, QueueOverflowError } = require('../src/security/concurrencyQueue');
 const { createGeminiBudgetGuard } = require('../src/engine/geminiBudgetGuard');
 const { createAnalysisCache } = require('../src/engine/analysisCache');
 const { analysisCache, runDeepDealAnalysis } = require('../src/engine/aiAgent');
 const { analyzeProductPricing } = require('../src/engine/priceIntelligence');
-const { buildMerchantOfferLink } = require('../src/engine/affiliateLinks');
+const { buildDirectStoreSearchUrl, buildMerchantOfferLink } = require('../src/engine/affiliateLinks');
+const { isNonProductUrl, isPriceCoherent, isSameProductMatch } = require('../src/engine/competitorVerifier');
 const { createRedisClient } = require('../src/storage/redisClient');
 const { createTrafficMetrics } = require('../src/storage/trafficMetrics');
 
@@ -776,6 +787,271 @@ test('Affiliate links, dynamic AdSense/Cloudflare CSP, ads.txt, trust pages & pr
         validateTurnstilePayload({ success: true, action: 'analyze', hostname: 'localhost' }),
         false
       );
+
+      // 6. Real retailer allowlist vs aggregator/junk rejection, product matching, zero Google Shopping, and chart reconciliation
+      assert.equal(isAggregatorOrNonRetailHost('www.idealo.de'), true);
+      assert.equal(isAggregatorOrNonRetailHost('geizhals.de'), true);
+      assert.equal(isReputableRetailerHost('www.coolblue.de'), true);
+      assert.equal(isReputableRetailerHost('jarvin.lv'), false);
+      assert.equal(isReputableRetailerHost('lavar.jn'), false);
+      assert.equal(isReputableRetailerHost('www.idealo.de'), false);
+
+      // normalizeGroundedData strips aggregators (idealo, geizhals) and junk unverified domains (jarvin.lv)
+      const dirtyGrounding = normalizeGroundedData(
+        {
+          title: 'Sony WF-1000XM6',
+          currentPrice: 222,
+          average30d: 230,
+          average90d: 245,
+          lowest180d: 215,
+          highest180d: 299,
+          competitors: [
+            { retailer: 'Idealo', price: 218, url: 'https://www.idealo.de/preisvergleich/123.html' },
+            { retailer: 'Geizhals', price: 219, url: 'https://geizhals.de/sony-wf-1000xm6.html' },
+            { retailer: 'jarvin.lv', price: 189, url: 'https://jarvin.lv/sony-xm6' },
+            { retailer: 'lavar.jn', price: 195 },
+            { retailer: 'Coolblue', price: 222, url: 'https://www.coolblue.de/en/product/975197/sony-wf-1000xm6-black.html' }
+          ]
+        },
+        {
+          parsedTitle: 'Sony WF-1000XM6',
+          liveTitle: 'Sony WF-1000XM6 Noise Cancelling Headphones',
+          brand: 'Sony',
+          category: 'Consumer Electronics & Audio',
+          currency: 'EUR',
+          retailerName: 'Amazon',
+          livePrice: 222
+        }
+      );
+      assert.equal(dirtyGrounding.competitors.some((c) => /idealo|geizhals|jarvin|lavar/i.test(c.retailer)), false);
+      assert.equal(dirtyGrounding.competitors.some((c) => c.retailer === 'Coolblue'), true);
+
+      // Product identity matcher prevents wrong generations, accessories, blog/review pages, and outlier prices
+      assert.equal(
+        isSameProductMatch({
+          targetTitle: 'Sony WF-1000XM6 Noise Cancelling Headphones Silver',
+          targetBrand: 'Sony',
+          targetSku: 'B0GFB2WX82',
+          candidateTitle: 'Sony WF-1000XM6 Black | Coolblue',
+          candidateUrl: 'https://www.coolblue.de/en/product/975197/sony-wf-1000xm6-black.html'
+        }),
+        true
+      );
+      assert.equal(
+        isSameProductMatch({
+          targetTitle: 'Sony WF-1000XM6 Noise Cancelling Headphones Silver',
+          targetBrand: 'Sony',
+          targetSku: 'B0GFB2WX82',
+          candidateTitle: 'Sony WF-1000XM5 Noise Cancelling Headphones',
+          candidateUrl: 'https://www.coolblue.de/en/product/930000/sony-wf-1000xm5.html'
+        }),
+        false
+      );
+      assert.equal(
+        isSameProductMatch({
+          targetTitle: 'Sony WF-1000XM6 Noise Cancelling Headphones Silver',
+          targetBrand: 'Sony',
+          targetSku: 'B0GFB2WX82',
+          candidateTitle: 'Silicone Charging Case for Sony WF-1000XM6',
+          candidateUrl: 'https://www.mediamarkt.de/de/product/_silicone-case-wf-1000xm6-123.html'
+        }),
+        false
+      );
+      assert.equal(
+        isSameProductMatch({
+          targetTitle: 'Sony WF-1000XM6 Noise Cancelling Headphones Silver',
+          targetBrand: 'Sony',
+          targetSku: 'B0GFB2WX82',
+          candidateTitle: 'Sony WF-1000XM6 im Test: Feinschliff an der Referenz',
+          candidateUrl: 'https://www.galaxus.de/de/page/sony-wf-1000xm6-im-test-41432'
+        }),
+        false
+      );
+      assert.equal(
+        isSameProductMatch({
+          targetTitle: 'Sony WF-1000XM6 Noise Cancelling Headphones',
+          targetBrand: 'Sony',
+          targetSku: 'B0GFB2WX82',
+          candidateTitle: 'Sony WF-1000XM6 In-Ear Kopfhörer mit Ladecase',
+          candidateUrl: 'https://www.mediamarkt.de/de/product/_sony-wf-1000xm6-3031746.html'
+        }),
+        true
+      );
+      assert.equal(
+        isSameProductMatch({
+          targetTitle: 'Sony WF-1000XM6 Noise Cancelling Headphones',
+          targetBrand: 'Sony',
+          targetSku: 'B0GFB2WX82',
+          candidateTitle: 'Sony WF-1000XM6 True Wireless Earbuds with Charging Case',
+          candidateUrl: 'https://www.coolblue.de/en/product/975197/sony-wf-1000xm6-black.html'
+        }),
+        true
+      );
+      assert.equal(
+        isSameProductMatch({
+          targetTitle: "Tefal Jamie Oliver Cook's Direct On Bratpfanne 28 cm",
+          targetBrand: 'Tefal',
+          targetSku: 'B08GH6R477',
+          candidateTitle: "Ersatzteile & Zubehör Jamie Oliver Cook's Direct On Pfanne 28cm",
+          candidateUrl: 'https://www.tefal.de/jamie-oliver-pfanne-28-cm/csp/2100118329'
+        }),
+        false
+      );
+      assert.equal(
+        isSameProductMatch({
+          targetTitle: "Tefal Jamie Oliver Cook's Direct On Bratpfanne 28 cm",
+          targetBrand: 'Tefal',
+          targetSku: 'B08GH6R477',
+          candidateTitle: "Tefal Jamie Oliver Cook's Direct On Pfannenset 3-teilig",
+          candidateUrl: 'https://www.galaxus.de/de/s2/product/tefal-jamie-oliver-pfannenset-14030381'
+        }),
+        false
+      );
+      assert.equal(
+        isSameProductMatch({
+          targetTitle: "Tefal Jamie Oliver Cook's Direct On Bratpfanne 28 cm",
+          targetBrand: 'Tefal',
+          targetSku: 'B08GH6R477',
+          candidateTitle: "Tefal Jamie Oliver Cook's Direct On Bratpfanne 24 cm",
+          candidateUrl: 'https://www.galaxus.de/de/s2/product/tefal-jamie-oliver-24-cm-14030379'
+        }),
+        false
+      );
+      assert.equal(
+        isSameProductMatch({
+          targetTitle: "Tefal Jamie Oliver Cook's Direct On Bratpfanne 28 cm",
+          targetBrand: 'Tefal',
+          targetSku: 'B08GH6R477',
+          candidateTitle: "Tefal Jamie Oliver Cook's Direct on (Bratpfanne, Edelstahl, 28 x 5 cm)",
+          candidateUrl: 'https://www.galaxus.de/de/s2/product/tefal-jamie-oliver-cooks-direct-on-bratpfanne-14030380'
+        }),
+        true
+      );
+      assert.equal(isNonProductUrl('https://www.otto.de/haushalt/pfannen/bratpfannen/?serie=tefal-jamie-oliver'), true);
+      assert.equal(isNonProductUrl('https://www.otto.de/technik/audio/kopfhoerer/in-ear-kopfhoerer/'), true);
+      assert.equal(isNonProductUrl('https://www.otto.de/p/jamie-oliver-bratpfanne-28-cm-S0J9V0QG/'), false);
+      assert.equal(isNonProductUrl('https://www.lidl.de/c/jamie-oliver-x-tefal/s10049134'), true);
+      assert.equal(isNonProductUrl('https://www.coolblue.de/kopfhoerer/noise-cancelling/testsieger'), true);
+      assert.equal(isNonProductUrl('https://www.kaufland.de/i/beratung/kuechenausstattung/~abc/'), true);
+      assert.equal(isNonProductUrl('https://www.kaufland.de/product/428848838/'), false);
+      assert.equal(isNonProductUrl('https://www.aboutyou.de/c/herren/schuhe'), true);
+      assert.equal(isNonProductUrl('https://www.aboutyou.de/p/adidas-originals/sneaker-samba-og-32118280'), false);
+      assert.equal(isNonProductUrl('https://www.coolblue.de/kopfhoerer/noise-cancelling'), true);
+      assert.equal(isNonProductUrl('https://www.coolblue.de/en/product/975198/sony-wf-1000xm6-silver.html'), false);
+
+      assert.equal(
+        isSameProductMatch({
+          targetTitle: 'adidas Originals SAMBA OG UNISEX - Low-Top-Sneaker - footwear white/core black/clear granit/weiß',
+          targetBrand: 'adidas Originals',
+          targetSku: 'AD115O03M-A11',
+          candidateTitle: 'adidas Samba OG Shoes - White',
+          candidateUrl: 'https://www.adidas.de/en/samba-og-shoes/B75806.html'
+        }),
+        true
+      );
+
+      assert.equal(
+        buildCleanSearchProductName(
+          'adidas Originals SAMBA OG UNISEX - Low-Top-Sneaker - footwear white/core black/clear granit/weiß',
+          'adidas Originals'
+        ),
+        'adidas Originals SAMBA OG'
+      );
+      assert.equal(
+        buildCleanSearchProductName("Tefal Jamie Oliver Cook's Direct on (Bratpfanne, Edelstahl, 28 x 5 cm)", 'Tefal'),
+        "Tefal Jamie Oliver Cook's Direct on Bratpfanne 28 cm"
+      );
+      assert.equal(
+        buildCleanSearchProductName("Tefal Jamie Oliver Cook's Direct On Bratpfanne 28 cm, Thermo-Signal", 'Tefal'),
+        "Tefal Jamie Oliver Cook's Direct On Bratpfanne 28 cm"
+      );
+      assert.equal(
+        buildCleanSearchProductName("Tefal Jamie Oliver Cook's Direct On Bratpfanne 28 cm, Thermo-Signal", 'Amazon'),
+        "Tefal Jamie Oliver Cook's Direct On Bratpfanne 28 cm"
+      );
+      assert.equal(
+        parseProductFromPath('/adidas-originals-samba-sneaker-low-ad115o03m-a11.html', 'zalando', 'Zalando').sku,
+        'AD115O03M-A11'
+      );
+      for (const zSku of ['AD115O03M-A11', '15O03M-A11']) {
+        assert.equal(
+          isSameProductMatch({
+            targetTitle: 'adidas Originals SAMBA OG UNISEX - Low-Top-Sneaker - footwear white/core black/clear granit/weiß',
+            targetBrand: 'adidas Originals',
+            targetSku: zSku,
+            candidateTitle: "ADIDAS ORIGINALS Sneaker 'SAMBA OG' in Weiß",
+            candidateUrl: 'https://www.aboutyou.de/p/adidas-originals/sneaker-samba-og-32118280'
+          }),
+          true
+        );
+      }
+
+      const extractedProseOffers = extractStorePricesFromProse(
+        [
+          '- Store: MediaMarkt | Price: 49.99 EUR | Stock: In Stock | Variant: Tefal Jamie Oliver 28 cm',
+          '- Store: Idealo | Price: 39.00 EUR | Stock: In Stock | Variant: Aggregator',
+          '- Store: Geizhals | Price: 38.00 EUR | Stock: In Stock | Variant: Aggregator',
+          '- Store: Saturn | Price: 54.99 EUR | Stock: Out of Stock | Variant: Tefal Jamie Oliver 28 cm',
+          '- Store: Kaufland | Price: 75.06 EUR | Stock: In Stock | Variant: Tefal Jamie Oliver E30406',
+          '### 1. **OTTO**',
+          '* **Price:** **€222.00** *(UVP €299.00)*'
+        ].join('\n'),
+        'EUR'
+      );
+      assert.equal(extractedProseOffers.some((o) => /idealo|geizhals|saturn/i.test(o.retailer)), false);
+      assert.equal(extractedProseOffers.find((o) => o.retailer === 'MediaMarkt')?.price, 49.99);
+      assert.equal(extractedProseOffers.find((o) => o.retailer === 'Kaufland')?.price, 75.06);
+      assert.equal(extractedProseOffers.find((o) => o.retailer === 'Otto')?.price, 222);
+
+      assert.equal(isPriceCoherent(222, 39.99), false);
+      assert.equal(isPriceCoherent(222, 222), true);
+
+      // Zero Google Shopping fallback URLs
+      assert.equal(
+        buildDirectStoreSearchUrl({
+          retailerName: 'RandomUnknownShop',
+          title: 'Sony WF-1000XM6',
+          sku: 'B0GFB2WX82',
+          currency: 'EUR',
+          isTargetStore: false
+        }),
+        null
+      );
+      const directVerifiedOffer = buildMerchantOfferLink({
+        retailerName: 'Coolblue',
+        title: 'Sony WF-1000XM6',
+        sku: 'B0GFB2WX82',
+        currency: 'EUR',
+        isTargetStore: false,
+        directProductUrl: 'https://www.coolblue.de/en/product/975197/sony-wf-1000xm6-black.html'
+      });
+      assert.equal(directVerifiedOffer.offerUrl, 'https://www.coolblue.de/en/product/975197/sony-wf-1000xm6-black.html');
+
+      // Reconciled 30 / 90 / 180-day window invariants match chart history strictly
+      const reconReport = analyzeProductPricing({
+        urlInfo: sampleUrl,
+        liveSignals: { liveFetched: true, metadata: { title: 'Sony WF-1000XM6', price: 222, referencePrice: 299, currency: 'EUR' } },
+        webSearch: null,
+        geminiGrounded: null,
+        verifiedCompetitors: [
+          {
+            retailer: 'Coolblue',
+            price: 222,
+            shipping: 'Free Standard Shipping',
+            stock: 'In Stock',
+            directProductUrl: 'https://www.coolblue.de/en/product/975197/sony-wf-1000xm6-black.html',
+            verifiedLive: true,
+            verificationLabel: 'VERIFIED LIVE'
+          }
+        ]
+      });
+      const w30 = reconReport.pricing.windowComparisons.days30;
+      const w90 = reconReport.pricing.windowComparisons.days90;
+      const w180 = reconReport.pricing.windowComparisons.days180;
+      assert.ok(w180.ownSellerLow <= w90.ownSellerLow + 0.01 && w90.ownSellerLow <= w30.ownSellerLow + 0.01);
+      assert.ok(w180.ownSellerHigh >= w90.ownSellerHigh - 0.01 && w90.ownSellerHigh >= w30.ownSellerHigh - 0.01);
+      assert.ok(Math.abs(w90.ownSellerAvg - reconReport.pricing.average90d) <= 0.1);
+      assert.ok(reconReport.competitors.every((c) => !c.offerUrl || !c.offerUrl.includes('google.com/search')));
     } finally {
       await stopTestServer(server);
     }
