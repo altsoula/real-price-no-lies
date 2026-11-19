@@ -39,7 +39,7 @@
     function applyTheme(theme) {
       document.documentElement.setAttribute('data-theme', theme);
       if (toggleBtn) {
-        toggleBtn.textContent = theme === 'carbon' ? 'PAPER MODE' : 'CARBON MODE';
+        toggleBtn.textContent = theme === 'carbon' ? '☼ PAPER MODE' : '◐ CARBON MODE';
       }
       try {
         window.localStorage.setItem(THEME_STORAGE_KEY, theme);
@@ -340,6 +340,31 @@
   }
 
   /**
+   * 21st.dev Style Smooth Ease-out Count-up Odometer for Deal Truth Score.
+   */
+  function animateScoreCountUp(targetScore) {
+    const el = document.getElementById('res-score');
+    if (!el) return;
+    const target = Math.round(Number(targetScore) || 0);
+    const duration = 1000;
+    const startTime = performance.now();
+
+    function frame(now) {
+      const progress = Math.min(1, (now - startTime) / duration);
+      // easeOutExpo for tactile spring deceleration
+      const ease = progress === 1 ? 1 : 1 - Math.pow(2, -10 * progress);
+      const val = Math.round(target * ease);
+      el.textContent = String(val);
+      if (progress < 1) {
+        requestAnimationFrame(frame);
+      } else {
+        el.textContent = String(target);
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+
+  /**
    * Renders the full forensic analysis report safely using textContent / createElement.
    */
   function renderReport(data) {
@@ -364,7 +389,7 @@
     document.getElementById('res-title').textContent = product.title;
     document.getElementById('res-url-display').textContent = product.normalizedUrl;
 
-    // 0-100 Score Hero with semantic vibrant tone
+    // 0-100 Score Hero with 21st.dev Dynamic Tone, Glow & Rolling Odometer
     const scoreEl = document.getElementById('res-score');
     const scoreFillEl = document.getElementById('res-score-fill');
     const verdictBadge = document.getElementById('res-verdict-badge');
@@ -377,15 +402,28 @@
             ? 'tone-mid'
             : 'tone-low';
 
-    scoreEl.textContent = String(scoring.dealScore);
+    const scoreHeroCard = document.querySelector('.score-hero-card');
+    if (scoreHeroCard) {
+      scoreHeroCard.classList.remove('score-steal-glow', 'score-trap-glow');
+      if (scoring.dealScore >= 85) {
+        scoreHeroCard.classList.add('score-steal-glow');
+      } else if (scoring.dealScore < 40) {
+        scoreHeroCard.classList.add('score-trap-glow');
+      }
+    }
+
+    animateScoreCountUp(scoring.dealScore);
     scoreEl.className = `score-big mono ${toneClass}`;
     verdictBadge.textContent = scoring.verdictLabel;
     verdictBadge.className = `verdict-badge ${toneClass}`;
     document.getElementById('res-verdict-action').textContent = scoring.verdictAction;
 
     scoreFillEl.className = `score-meter-fill ${toneClass}`;
-    scoreFillEl.style.width = `${scoring.dealScore}%`;
-    document.getElementById('res-score-marker').style.left = `calc(${scoring.dealScore}% - 1.5px)`;
+    requestAnimationFrame(() => {
+      scoreFillEl.style.width = `${scoring.dealScore}%`;
+      const marker = document.getElementById('res-score-marker');
+      if (marker) marker.style.left = `calc(${scoring.dealScore}% - 2px)`;
+    });
 
     // Breakdown Bars
     const breakdownList = document.getElementById('res-breakdown-list');
@@ -642,6 +680,15 @@
     if (analyzeBtn) analyzeBtn.disabled = true;
     if (progressPanel) progressPanel.classList.remove('hidden');
 
+    const stopwatchEl = document.getElementById('audit-stopwatch');
+    const auditStart = performance.now();
+    const stopwatchTimer = setInterval(() => {
+      if (stopwatchEl) {
+        const sec = ((performance.now() - auditStart) / 1000).toFixed(1);
+        stopwatchEl.textContent = `${sec}s`;
+      }
+    }, 100);
+
     let activeStep = 0;
     const stepTimer = setInterval(() => {
       stepItems.forEach((li, i) => {
@@ -671,10 +718,19 @@
       }
 
       renderReport(payload);
+      try {
+        const u = new URL(window.location.href);
+        u.searchParams.set('url', candidate);
+        window.history.replaceState({}, '', u.toString());
+      } catch {
+        // Ignore URL state errors
+      }
     } catch {
       showError('Network or server error while inspecting URL. Please check your connection and try again.');
     } finally {
       clearInterval(stepTimer);
+      clearInterval(stopwatchTimer);
+      if (stopwatchEl) stopwatchEl.textContent = '0.0s';
       if (progressPanel) progressPanel.classList.add('hidden');
       if (analyzeBtn) analyzeBtn.disabled = false;
       if (turnstileWidgetId !== null && window.turnstile && typeof window.turnstile.reset === 'function') {
@@ -778,6 +834,67 @@
         if (lastReport) renderPriceChart(lastReport, currentChartRange);
       });
     });
+
+    // 21st.dev Interactive Quick Live Audit Chips
+    document.querySelectorAll('.demo-chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        const demoUrl = chip.getAttribute('data-url');
+        if (demoUrl) {
+          if (urlInput) urlInput.value = demoUrl;
+          runAnalysis(demoUrl);
+        }
+      });
+    });
+
+    // Share report button with tactile feedback
+    const shareBtn = document.getElementById('share-report-btn');
+    if (shareBtn) {
+      shareBtn.addEventListener('click', async () => {
+        const shareUrl = window.location.href;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(shareUrl);
+          } else {
+            const temp = document.createElement('input');
+            temp.value = shareUrl;
+            document.body.appendChild(temp);
+            temp.select();
+            document.execCommand('copy');
+            document.body.removeChild(temp);
+          }
+          const orig = shareBtn.textContent;
+          shareBtn.textContent = 'COPIED! ✓';
+          shareBtn.classList.add('btn-copied');
+          setTimeout(() => {
+            shareBtn.textContent = orig;
+            shareBtn.classList.remove('btn-copied');
+          }, 2000);
+        } catch {
+          // Ignore clipboard failure
+        }
+      });
+    }
+
+    // 21st.dev Dynamic Cursor Spotlight Tracking
+    document.querySelectorAll('.card-sharp').forEach((card) => {
+      card.addEventListener('pointermove', (e) => {
+        const rect = card.getBoundingClientRect();
+        card.style.setProperty('--mouse-x', `${e.clientX - rect.left}px`);
+        card.style.setProperty('--mouse-y', `${e.clientY - rect.top}px`);
+      });
+    });
+
+    // Auto-inspect if ?url= parameter is provided in query string
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const initialUrl = urlParams.get('url');
+      if (initialUrl && (initialUrl.startsWith('http://') || initialUrl.startsWith('https://'))) {
+        if (urlInput) urlInput.value = initialUrl;
+        runAnalysis(initialUrl);
+      }
+    } catch {
+      // Ignore query string parse errors
+    }
   }
 
   document.addEventListener('DOMContentLoaded', initApp);

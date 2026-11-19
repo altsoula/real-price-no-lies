@@ -12,9 +12,9 @@
   <meta property="og:type" content="website">
   <link rel="canonical" href="https://realpricenolies.online/">
   <meta property="og:url" content="https://realpricenolies.online/">
-  <link rel="stylesheet" href="/styles.css?v=6">
-  <script src="/cookie-Consent.js?v=6" defer></script>
-  <script src="/app.js?v=6" defer></script>
+  <link rel="stylesheet" href="/styles.css?v=8">
+  <script src="/cookie-Consent.js?v=8" defer></script>
+  <script src="/app.js?v=8" defer></script>
 </head>
 <body>
   <div class="page-stage">
@@ -116,11 +116,24 @@
         <span class="retailer-pill">+ Any Public Shop URL</span>
       </div>
 
-      <!-- Multi-Step Forensic Progress Console -->
+      <!-- 21st.dev Style Quick Live Audit Chips -->
+      <div class="demo-strip">
+        <span class="demo-label">⚡ TRY A LIVE AUDIT:</span>
+        <button type="button" class="demo-chip" data-url="https://www.amazon.de/dp/B0CX23V2ZH">Sony XM6 Headphones</button>
+        <button type="button" class="demo-chip" data-url="https://www.mediamarkt.de/de/product/_tefal-c38406-xl-force-bratpfanne-28-cm-bratpfanne-280-mm-schwarz-2720935.html">Tefal 28cm Pan</button>
+        <button type="button" class="demo-chip" data-url="https://www.zalando.de/adidas-originals-samba-og-sneaker-low-cloud-whitecore-blackclear-granite-ad115o03m-a11.html">adidas Samba OG</button>
+        <button type="button" class="demo-chip" data-url="https://www.ikea.com/de/de/p/markus-drehstuhl-vissle-dunkelgrau-70261150/">IKEA MARKUS Chair</button>
+      </div>
+
+      <!-- Multi-Step Forensic Progress Console with 21st.dev Radar Sweep & Telemetry Timer -->
       <div id="progress-panel" class="progress-panel hidden" aria-live="polite">
+        <div class="forensic-radar-beam" aria-hidden="true"></div>
         <div class="progress-header">
-          <span class="spinner-square" aria-hidden="true"></span>
-          <strong>RUNNING DEEP PRICE &amp; AI FORENSIC AUDIT...</strong>
+          <div class="progress-title-wrap">
+            <span class="spinner-square" aria-hidden="true"></span>
+            <strong>RUNNING DEEP PRICE &amp; AI FORENSIC AUDIT...</strong>
+          </div>
+          <span id="audit-stopwatch" class="mono audit-timer">0.0s</span>
         </div>
         <ol id="progress-steps" class="progress-steps">
           <li data-step="1">[1/4] Validating URL against SSRF, private IP &amp; injection rules...</li>
@@ -152,6 +165,7 @@
           <p id="res-url-display" class="normalized-url mono"></p>
         </div>
         <div class="identity-actions">
+          <button type="button" id="share-report-btn" class="btn-ghost" title="Copy shareable deal audit link">SHARE AUDIT ↗</button>
           <button type="button" id="inspect-another-btn" class="btn-secondary">NEW CHECK</button>
         </div>
       </div>
