@@ -266,6 +266,19 @@
     });
     svg.appendChild(crosshair);
 
+    function selectPointIndex(idx) {
+      if (idx < 0 || idx >= points.length) return;
+      const pt = points[idx];
+      const cx = xForIndex(idx);
+      crosshair.setAttribute('x1', String(cx));
+      crosshair.setAttribute('x2', String(cx));
+      crosshair.setAttribute('visibility', 'visible');
+      if (readout) {
+        const eventStr = pt.event ? ` | EVENT: ${pt.event}` : '';
+        readout.textContent = `${pt.date} — Store: ${formatMoney(pt.retailerPrice, currency)} | Market Floor: ${formatMoney(pt.marketBestPrice, currency)} | 90d Avg: ${formatMoney(pt.movingAvg90d, currency)}${eventStr}`;
+      }
+    }
+
     // Interactive point markers & invisible hit targets
     points.forEach((pt, idx) => {
       const cx = xForIndex(idx);
@@ -291,20 +304,37 @@
         style: 'cursor: crosshair;'
       });
 
-      const inspectPoint = () => {
-        crosshair.setAttribute('x1', String(cx));
-        crosshair.setAttribute('x2', String(cx));
-        crosshair.setAttribute('visibility', 'visible');
-        if (readout) {
-          const eventStr = pt.event ? ` | EVENT: ${pt.event}` : '';
-          readout.textContent = `${pt.date} — Store: ${formatMoney(pt.retailerPrice, currency)} | Market Floor: ${formatMoney(pt.marketBestPrice, currency)} | 90d Avg: ${formatMoney(pt.movingAvg90d, currency)}${eventStr}`;
-        }
-      };
-
-      hit.addEventListener('mouseenter', inspectPoint);
-      hit.addEventListener('click', inspectPoint);
+      hit.addEventListener('mouseenter', () => selectPointIndex(idx));
+      hit.addEventListener('click', () => selectPointIndex(idx));
       svg.appendChild(hit);
     });
+
+    // Touch & pointer scrub support for seamless mobile inspection
+    const scrubPointFromEvent = (e) => {
+      const rect = svg.getBoundingClientRect();
+      const clientX = e.touches && e.touches[0] ? e.touches[0].clientX : e.clientX;
+      if (typeof clientX !== 'number' || Number.isNaN(clientX) || rect.width <= 0) return;
+      const relX = clientX - rect.left;
+      const scaleX = width / rect.width;
+      const svgX = relX * scaleX;
+      const clampedX = Math.max(pad.left, Math.min(width - pad.right, svgX));
+      const idx = Math.min(
+        points.length - 1,
+        Math.max(0, Math.round(((clampedX - pad.left) / plotW) * (points.length - 1)))
+      );
+      selectPointIndex(idx);
+    };
+
+    svg.addEventListener('touchstart', scrubPointFromEvent, { passive: true });
+    svg.addEventListener('touchmove', scrubPointFromEvent, { passive: true });
+    svg.addEventListener('pointermove', (e) => {
+      if (e.buttons > 0 || e.pointerType === 'mouse') {
+        scrubPointFromEvent(e);
+      }
+    });
+
+    // Select the latest point (today) by default so mobile users see immediate values
+    selectPointIndex(points.length - 1);
 
     container.appendChild(svg);
   }
@@ -475,6 +505,7 @@
       if (comp.isTargetStore) tr.className = 'row-highlight';
 
       const tdStore = document.createElement('td');
+      tdStore.setAttribute('data-label', 'Retailer');
       tdStore.textContent = comp.retailer;
       if (comp.isBestPrice) {
         const badge = document.createElement('span');
@@ -496,10 +527,12 @@
 
       const tdPrice = document.createElement('td');
       tdPrice.className = 'mono';
+      tdPrice.setAttribute('data-label', 'Price');
       tdPrice.textContent = formatMoney(comp.price, c);
 
       const tdDelta = document.createElement('td');
       tdDelta.className = 'mono';
+      tdDelta.setAttribute('data-label', 'vs. Target');
       if (Math.abs(comp.deltaVsTarget) < 0.01) {
         tdDelta.textContent = 'BASELINE';
       } else if (comp.deltaVsTarget < 0) {
@@ -509,9 +542,11 @@
       }
 
       const tdShip = document.createElement('td');
+      tdShip.setAttribute('data-label', 'Delivery & Stock');
       tdShip.textContent = `${comp.shipping} · ${comp.stock}`;
 
       const tdOffer = document.createElement('td');
+      tdOffer.setAttribute('data-label', 'Offer');
       if (typeof comp.offerUrl === 'string' && comp.offerUrl.startsWith('https://')) {
         const offerLink = document.createElement('a');
         offerLink.href = comp.offerUrl;
@@ -561,13 +596,17 @@
     intelSources.forEach((src) => {
       const tr = document.createElement('tr');
       const tdSource = document.createElement('td');
+      tdSource.setAttribute('data-label', 'Intel Source');
       tdSource.textContent = src.source;
       const tdMethod = document.createElement('td');
+      tdMethod.setAttribute('data-label', 'Method');
       tdMethod.textContent = src.method;
       const tdWeight = document.createElement('td');
       tdWeight.className = 'mono';
+      tdWeight.setAttribute('data-label', 'Weight');
       tdWeight.textContent = src.weight;
       const tdStatus = document.createElement('td');
+      tdStatus.setAttribute('data-label', 'Status');
       const tag = document.createElement('span');
       tag.className = 'badge-mini';
       tag.textContent = src.status;
@@ -662,9 +701,11 @@
 
       window.__onRpnlTurnstileLoad = () => {
         if (!window.turnstile || turnstileWidgetId !== null) return;
+        const isMobileNarrow = typeof window !== 'undefined' && window.innerWidth < 380;
         turnstileWidgetId = window.turnstile.render(slot, {
           sitekey: turnstileSiteKey,
           action: 'analyze',
+          size: isMobileNarrow ? 'compact' : 'normal',
           theme: document.documentElement.getAttribute('data-theme') === 'carbon' ? 'dark' : 'light',
           callback: (token) => {
             turnstileToken = token;
