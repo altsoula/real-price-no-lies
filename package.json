@@ -1,0 +1,23 @@
+{
+  "name": "real-price-no-lies",
+  "version": "1.0.0",
+  "description": "RealPriceNoLies - Zero-signup, security-hardened AI price history & deal truth analyzer.",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test tests/security-and-engine.test.js"
+  },
+  "keywords": [
+    "price-tracker",
+    "deal-analyzer",
+    "security-hardened",
+    "ai-transparency",
+    "zero-pii"
+  ],
+  "license": "MIT"
+}
+

@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: realpricenolies
+    runtime: node
+    plan: starter
+    buildCommand: "echo Zero-dependency Node app ready"
+    startCommand: "node src/server.js"
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: TRUST_PROXY
+        value: "true"
+      - key: FORCE_HTTPS
+        value: "true"
+      - key: PUBLIC_SITE_URL
+        value: https://realpricenolies.online
+      - key: MAX_DAILY_GEMINI_CALLS
+        value: "500"
+      - key: MAX_MINUTE_GEMINI_CALLS
+        value: "30"
+      - key: MAX_CONCURRENT_ANALYSES
+        value: "15"
+      - key: RATE_LIMIT_MAX_REQUESTS
+        value: "12"
+      - key: GEMINI_API_KEY
+        sync: false
+
