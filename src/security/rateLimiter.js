@@ -1,28 +1,37 @@
 'use strict';
 
+const crypto = require('node:crypto');
+
 /**
  * Extracts a client identifier from the underlying socket unless TRUST_PROXY=true.
- * Prevents trivial rate-limit bypass via spoofable X-Forwarded-For headers.
+ * Prefers Cloudflare's verified CF-Connecting-IP when behind Cloudflare proxy,
+ * preventing trivial rate-limit bypass via spoofable headers when untrusted.
  * @param {import('node:http').IncomingMessage} req
  * @returns {string}
  */
 function getClientIp(req) {
-  if (process.env.TRUST_PROXY === 'true') {
+  if (process.env.TRUST_PROXY === 'true' && req && req.headers) {
+    const cfIp = req.headers['cf-connecting-ip'];
+    if (typeof cfIp === 'string' && cfIp.trim()) {
+      return cfIp.split(',')[0].trim();
+    }
     const xff = req.headers['x-forwarded-for'];
     if (typeof xff === 'string' && xff.trim()) {
       return xff.split(',')[0].trim();
     }
   }
-  return (req.socket && req.socket.remoteAddress) || 'unknown';
+  return (req && req.socket && req.socket.remoteAddress) || 'unknown';
 }
 
 /**
- * Creates a bounded-memory sliding-window IP rate limiter to guard against DoS and scraping abuse.
+ * Creates a bounded-memory sliding-window IP rate limiter with optional Redis backing
+ * for shared multi-replica enforcement.
  */
 function createRateLimiter({
   windowMs = 60_000,
   maxRequests = 25,
-  maxTrackedIps = 5000
+  maxTrackedIps = 5000,
+  redisClient = null
 } = {}) {
   /** @type {Map<string, number[]>} */
   const buckets = new Map();
@@ -48,7 +57,7 @@ function createRateLimiter({
   }
 
   /**
-   * Checks and consumes one request quota unit for the given client IP.
+   * Checks and consumes one request quota unit synchronously from volatile memory.
    * @param {string} ip
    * @param {number} [now]
    */
@@ -90,8 +99,50 @@ function createRateLimiter({
     };
   }
 
+  /**
+   * Distributed Redis-backed rate-limit check with automatic fallback to in-memory limiting.
+   * Hashes client IP before persisting Redis keys to preserve zero-PII hygiene.
+   * @param {string} ip
+   * @param {number} [now]
+   */
+  async function consumeAsync(ip, now = Date.now()) {
+    if (redisClient && redisClient.isConfigured()) {
+      try {
+        const ipHash = crypto.createHash('sha256').update(String(ip || 'unknown')).digest('hex').slice(0, 32);
+        const bucket = Math.floor(now / windowMs);
+        const redisKey = `rpnl:rl:${ipHash}:${bucket}`;
+        const count = await redisClient.incr(redisKey);
+        if (count === 1) {
+          await redisClient.pexpire(redisKey, windowMs);
+        }
+        const resetMs = (bucket + 1) * windowMs;
+        const retryAfterSec = Math.max(1, Math.ceil((resetMs - now) / 1000));
+        if (count > maxRequests) {
+          return {
+            allowed: false,
+            limit: maxRequests,
+            remaining: 0,
+            resetEpochSec: Math.ceil(resetMs / 1000),
+            retryAfterSec
+          };
+        }
+        return {
+          allowed: true,
+          limit: maxRequests,
+          remaining: Math.max(0, maxRequests - count),
+          resetEpochSec: Math.ceil(resetMs / 1000),
+          retryAfterSec: 0
+        };
+      } catch {
+        // Fallback smoothly to in-memory rate limiter
+      }
+    }
+    return consume(ip, now);
+  }
+
   return {
     consume,
+    consumeAsync,
     getClientIp,
     size: () => buckets.size
   };
@@ -101,4 +152,3 @@ module.exports = {
   createRateLimiter,
   getClientIp
 };
-

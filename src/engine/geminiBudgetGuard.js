@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { getSharedRedisClient } = require('../storage/redisClient');
 
 const DEFAULT_PERSIST_PATH = path.resolve(__dirname, '..', '..', '.gemini-budget.json');
 
@@ -11,12 +12,13 @@ function getUtcDateKey(now = Date.now()) {
 
 /**
  * Hard daily + per-minute Gemini API circuit breaker to protect wallet credits
- * against unexpected traffic spikes across all visitors.
+ * against unexpected traffic spikes across single or multi-replica deployments.
  */
 function createGeminiBudgetGuard({
   maxDailyCalls = null,
   maxMinuteCalls = null,
-  persistFilePath = DEFAULT_PERSIST_PATH
+  persistFilePath = DEFAULT_PERSIST_PATH,
+  redisClient = null
 } = {}) {
   let dailyState = {
     date: getUtcDateKey(),
@@ -113,6 +115,68 @@ function createGeminiBudgetGuard({
     };
   }
 
+  async function tryConsumeAsync(now = Date.now()) {
+    if (redisClient && redisClient.isConfigured()) {
+      try {
+        const { dailyCap, minuteCap } = getCaps();
+        const today = getUtcDateKey(now);
+        const minuteBucket = Math.floor(now / 60_000);
+        const dayKey = `rpnl:budget:day:${today}`;
+        const minKey = `rpnl:budget:min:${minuteBucket}`;
+
+        const [curDayRaw, curMinRaw] = await Promise.all([
+          redisClient.get(dayKey),
+          redisClient.get(minKey)
+        ]);
+        const curDay = Number(curDayRaw) || 0;
+        const curMin = Number(curMinRaw) || 0;
+
+        if (curDay >= dailyCap) {
+          return {
+            allowed: false,
+            reason: 'DAILY_BUDGET_CAP_REACHED',
+            dailyCount: curDay,
+            dailyCap,
+            minuteCount: curMin,
+            minuteCap
+          };
+        }
+        if (curMin >= minuteCap) {
+          return {
+            allowed: false,
+            reason: 'MINUTE_BURST_CAP_REACHED',
+            dailyCount: curDay,
+            dailyCap,
+            minuteCount: curMin,
+            minuteCap
+          };
+        }
+
+        const [nextDay, nextMin] = await Promise.all([
+          redisClient.incr(dayKey),
+          redisClient.incr(minKey)
+        ]);
+        if (nextDay === 1) await redisClient.expire(dayKey, 48 * 3600);
+        if (nextMin === 1) await redisClient.expire(minKey, 120);
+
+        dailyState = { date: today, count: nextDay };
+        persist();
+
+        return {
+          allowed: true,
+          reason: 'OK',
+          dailyCount: nextDay,
+          dailyCap,
+          minuteCount: nextMin,
+          minuteCap
+        };
+      } catch {
+        // Fall through cleanly to local in-memory circuit breaker
+      }
+    }
+    return tryConsume(now);
+  }
+
   function getStats(now = Date.now()) {
     syncWindow(now);
     const { dailyCap, minuteCap } = getCaps();
@@ -126,18 +190,50 @@ function createGeminiBudgetGuard({
     };
   }
 
+  async function getStatsAsync(now = Date.now()) {
+    if (redisClient && redisClient.isConfigured()) {
+      try {
+        const { dailyCap, minuteCap } = getCaps();
+        const today = getUtcDateKey(now);
+        const minuteBucket = Math.floor(now / 60_000);
+        const [dayRaw, minRaw] = await Promise.all([
+          redisClient.get(`rpnl:budget:day:${today}`),
+          redisClient.get(`rpnl:budget:min:${minuteBucket}`)
+        ]);
+        const dailyUsed = Number(dayRaw) || 0;
+        const minuteUsed = Number(minRaw) || 0;
+        return {
+          date: today,
+          dailyUsed,
+          dailyLimit: dailyCap,
+          dailyRemaining: Math.max(0, dailyCap - dailyUsed),
+          minuteUsed,
+          minuteLimit: minuteCap
+        };
+      } catch {
+        // Fall back cleanly to local counter
+      }
+    }
+    return getStats(now);
+  }
+
   return {
     tryConsume,
-    getStats
+    tryConsumeAsync,
+    getStats,
+    getStatsAsync
   };
 }
 
-const defaultBudgetGuard = createGeminiBudgetGuard();
+const defaultBudgetGuard = createGeminiBudgetGuard({
+  redisClient: getSharedRedisClient()
+});
 
 module.exports = {
   createGeminiBudgetGuard,
   defaultBudgetGuard,
   tryConsumeGeminiQuota: (now) => defaultBudgetGuard.tryConsume(now),
-  getBudgetStats: (now) => defaultBudgetGuard.getStats(now)
+  tryConsumeGeminiQuotaAsync: (now) => defaultBudgetGuard.tryConsumeAsync(now),
+  getBudgetStats: (now) => defaultBudgetGuard.getStats(now),
+  getBudgetStatsAsync: (now) => defaultBudgetGuard.getStatsAsync(now)
 };
-

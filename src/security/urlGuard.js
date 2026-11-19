@@ -504,7 +504,7 @@ function cleanExtractedTitle(rawTitle) {
 function isBotChallengeHtml(html) {
   if (!html) return true;
   if (
-    /api-services-support@amazon\.|validateCaptcha|Robot Check|cf-browser-verification|Just a moment\.\.\.|window\.KPSDK/i.test(
+    /api-services-support@amazon\.|validateCaptcha|Robot Check|cf-browser-verification|Just a moment\.\.\.|window\.KPSDK|geo\.captcha-delivery\.com|datadome|_pxCaptcha|px-captcha|Reference #18\.[0-9a-f]/i.test(
       html
     )
   ) {
@@ -685,6 +685,83 @@ function extractSafeMetadataFromHtml(html) {
 }
 
 /**
+ * Selects a natural Accept-Language header matching the merchant storefront TLD.
+ * @param {string} hostname
+ */
+function selectAcceptLanguage(hostname) {
+  const lower = String(hostname || '').toLowerCase();
+  if (/\.(de|at|ch)$/.test(lower)) return 'de-DE,de;q=0.9,en;q=0.8';
+  if (/\.(co\.uk|uk)$/.test(lower)) return 'en-GB,en;q=0.9';
+  if (/\.fr$/.test(lower)) return 'fr-FR,fr;q=0.9,en;q=0.8';
+  return 'en-US,en;q=0.9';
+}
+
+/**
+ * Safely reads, decompresses, and byte-caps an HTTP response stream.
+ */
+function readDecompressedHtmlStream(res, status, maxBytes, resolve) {
+  const encoding = String(res.headers['content-encoding'] || '').toLowerCase().trim();
+  let bodyStream = res;
+  if (encoding === 'gzip' || encoding === 'x-gzip') {
+    bodyStream = res.pipe(zlib.createGunzip({ finishFlush: zlib.constants.Z_SYNC_FLUSH }));
+  } else if (encoding === 'br') {
+    bodyStream = res.pipe(zlib.createBrotliDecompress());
+  } else if (encoding === 'deflate') {
+    bodyStream = res.pipe(zlib.createInflate());
+  }
+
+  const chunks = [];
+  let received = 0;
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    resolve({
+      ok: true,
+      statusCode: status,
+      html: Buffer.concat(chunks).toString('utf8')
+    });
+  };
+
+  bodyStream.on('data', (chunk) => {
+    if (done) return;
+    const remaining = maxBytes - received;
+    if (remaining <= 0) {
+      if (bodyStream !== res && typeof bodyStream.destroy === 'function') bodyStream.destroy();
+      res.destroy();
+      finish();
+      return;
+    }
+    if (chunk.length > remaining) {
+      chunks.push(chunk.subarray(0, remaining));
+      received += remaining;
+      if (bodyStream !== res && typeof bodyStream.destroy === 'function') bodyStream.destroy();
+      res.destroy();
+      finish();
+    } else {
+      chunks.push(chunk);
+      received += chunk.length;
+    }
+  });
+  bodyStream.on('end', finish);
+  bodyStream.on('error', () => {
+    if (done) return;
+    if (received > 0) {
+      finish();
+      return;
+    }
+    done = true;
+    resolve({ ok: false, reason: 'Stream error during inspection' });
+  });
+  res.on('error', () => {
+    if (!done && received === 0) {
+      done = true;
+      resolve({ ok: false, reason: 'Response stream error' });
+    }
+  });
+}
+
+/**
  * Performs a single SSRF-pinned HTTP/HTTPS GET with strict timeout and byte limit.
  */
 function fetchWithPinnedIps(targetUrl, verifiedIps, timeoutMs, maxBytes) {
@@ -700,11 +777,11 @@ function fetchWithPinnedIps(targetUrl, verifiedIps, timeoutMs, maxBytes) {
         timeout: timeoutMs,
         headers: {
           'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
           Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-          'Accept-Language': 'de-DE,de;q=0.9,en-GB;q=0.8,en;q=0.7',
+          'Accept-Language': selectAcceptLanguage(parsed.hostname),
           'Accept-Encoding': 'gzip, deflate, br',
-          'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+          'Sec-Ch-Ua': '"Google Chrome";v="135", "Chromium";v="135", "Not_A Brand";v="24"',
           'Sec-Ch-Ua-Mobile': '?0',
           'Sec-Ch-Ua-Platform': '"Windows"',
           'Sec-Fetch-Dest': 'document',
@@ -745,65 +822,7 @@ function fetchWithPinnedIps(targetUrl, verifiedIps, timeoutMs, maxBytes) {
           return;
         }
 
-        const encoding = String(res.headers['content-encoding'] || '').toLowerCase().trim();
-        let bodyStream = res;
-        if (encoding === 'gzip' || encoding === 'x-gzip') {
-          bodyStream = res.pipe(zlib.createGunzip({ finishFlush: zlib.constants.Z_SYNC_FLUSH }));
-        } else if (encoding === 'br') {
-          bodyStream = res.pipe(zlib.createBrotliDecompress());
-        } else if (encoding === 'deflate') {
-          bodyStream = res.pipe(zlib.createInflate());
-        }
-
-        const chunks = [];
-        let received = 0;
-        let done = false;
-        const finish = () => {
-          if (done) return;
-          done = true;
-          resolve({
-            ok: true,
-            statusCode: status,
-            html: Buffer.concat(chunks).toString('utf8')
-          });
-        };
-
-        bodyStream.on('data', (chunk) => {
-          if (done) return;
-          const remaining = maxBytes - received;
-          if (remaining <= 0) {
-            if (bodyStream !== res && typeof bodyStream.destroy === 'function') bodyStream.destroy();
-            res.destroy();
-            finish();
-            return;
-          }
-          if (chunk.length > remaining) {
-            chunks.push(chunk.subarray(0, remaining));
-            received += remaining;
-            if (bodyStream !== res && typeof bodyStream.destroy === 'function') bodyStream.destroy();
-            res.destroy();
-            finish();
-          } else {
-            chunks.push(chunk);
-            received += chunk.length;
-          }
-        });
-        bodyStream.on('end', finish);
-        bodyStream.on('error', () => {
-          if (done) return;
-          if (received > 0) {
-            finish();
-            return;
-          }
-          done = true;
-          resolve({ ok: false, reason: 'Stream error during inspection' });
-        });
-        res.on('error', () => {
-          if (!done && received === 0) {
-            done = true;
-            resolve({ ok: false, reason: 'Response stream error' });
-          }
-        });
+        readDecompressedHtmlStream(res, status, maxBytes, resolve);
       }
     );
 
@@ -813,6 +832,86 @@ function fetchWithPinnedIps(targetUrl, verifiedIps, timeoutMs, maxBytes) {
     });
     req.on('error', () => {
       resolve({ ok: false, reason: 'Network request blocked or unreachable' });
+    });
+    req.end();
+  });
+}
+
+/**
+ * Builds the configured HTTPS scraper proxy URL for SSRF-verified public product links.
+ * Returns null if no proxy provider is configured or the template violates HTTPS policy.
+ * @param {string} targetUrl
+ */
+function buildScraperProxyEndpoint(targetUrl) {
+  const template = (process.env.SCRAPER_PROXY_TEMPLATE || '').trim();
+  if (template && template.includes('{url}')) {
+    const candidate = template.replace('{url}', encodeURIComponent(targetUrl));
+    try {
+      const parsed = new URL(candidate);
+      if (parsed.protocol === 'https:') {
+        return parsed.toString();
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  const apiKey = (process.env.SCRAPER_API_KEY || '').trim();
+  if (!apiKey) return null;
+
+  let countryCode = 'de';
+  try {
+    const host = new URL(targetUrl).hostname.toLowerCase();
+    if (/\.(co\.uk|uk)$/.test(host)) countryCode = 'uk';
+    else if (/\.fr$/.test(host)) countryCode = 'fr';
+    else if (/\.com$/.test(host)) countryCode = 'us';
+  } catch {
+    countryCode = 'de';
+  }
+
+  return `https://api.scraperapi.com/?api_key=${encodeURIComponent(apiKey)}&url=${encodeURIComponent(targetUrl)}&country_code=${countryCode}`;
+}
+
+/**
+ * Optional HTTPS residential-proxy fetch triggered ONLY for already-SSRF-validated URLs
+ * when direct storefront access hits datacenter-IP bot protection (e.g., 503/Kasada/DataDome).
+ * Never exposes proxy API keys in errors or return metadata.
+ */
+function fetchViaScraperProxy(targetUrl, timeoutMs = 9000, maxBytes = 3.5 * 1024 * 1024) {
+  const endpoint = buildScraperProxyEndpoint(targetUrl);
+  if (!endpoint) {
+    return Promise.resolve({ ok: false, unconfigured: true, reason: 'Scraper proxy unconfigured' });
+  }
+
+  return new Promise((resolve) => {
+    const req = https.request(
+      endpoint,
+      {
+        method: 'GET',
+        timeout: timeoutMs,
+        headers: {
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Encoding': 'gzip, deflate, br'
+        }
+      },
+      (res) => {
+        const status = res.statusCode || 0;
+        if (status < 200 || status >= 300) {
+          res.resume();
+          resolve({ ok: false, statusCode: status, reason: `Proxy fallback returned HTTP ${status}` });
+          return;
+        }
+        readDecompressedHtmlStream(res, status, maxBytes, resolve);
+      }
+    );
+
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ ok: false, reason: 'Proxy fallback timed out' });
+    });
+    req.on('error', () => {
+      resolve({ ok: false, reason: 'Proxy fallback unreachable' });
     });
     req.end();
   });
@@ -854,6 +953,18 @@ async function safeFetchProductSignals(urlInfo) {
     }
 
     if (!res.ok) {
+      const proxyRes = await fetchViaScraperProxy(currentInfo.normalizedUrl);
+      if (proxyRes.ok) {
+        const proxyMeta = extractSafeMetadataFromHtml(proxyRes.html || '');
+        if (!proxyMeta.isBotChallenge) {
+          return {
+            liveFetched: true,
+            viaProxy: true,
+            finalUrl: currentInfo.normalizedUrl,
+            metadata: proxyMeta
+          };
+        }
+      }
       return {
         liveFetched: false,
         reason: `Store returned ${res.reason || 'shielded response'}; falling back to live web price search.`
@@ -862,6 +973,18 @@ async function safeFetchProductSignals(urlInfo) {
 
     const metadata = extractSafeMetadataFromHtml(res.html || '');
     if (metadata.isBotChallenge) {
+      const proxyRes = await fetchViaScraperProxy(currentInfo.normalizedUrl);
+      if (proxyRes.ok) {
+        const proxyMeta = extractSafeMetadataFromHtml(proxyRes.html || '');
+        if (!proxyMeta.isBotChallenge) {
+          return {
+            liveFetched: true,
+            viaProxy: true,
+            finalUrl: currentInfo.normalizedUrl,
+            metadata: proxyMeta
+          };
+        }
+      }
       return {
         liveFetched: false,
         reason: 'Store bot-protection stub detected; falling back to live web price search.'
@@ -880,10 +1003,13 @@ async function safeFetchProductSignals(urlInfo) {
 
 module.exports = {
   UrlSecurityError,
+  buildScraperProxyEndpoint,
   extractSafeMetadataFromHtml,
+  fetchViaScraperProxy,
   isPrivateOrReservedIP,
   parseLocalizedPrice,
   safeFetchProductSignals,
+  selectAcceptLanguage,
   validateAndNormalizeProductUrl
 };
 

@@ -8,10 +8,15 @@ const { runGeminiGroundedProductResearch } = require('./geminiGroundedSearch');
 const { analyzeProductPricing } = require('./priceIntelligence');
 const { createAnalysisCache } = require('./analysisCache');
 const { createConcurrencyQueue } = require('../security/concurrencyQueue');
+const { getSharedRedisClient } = require('../storage/redisClient');
+const { recordAnalysis } = require('../storage/trafficMetrics');
 
 loadLocalEnv();
 
-const analysisCache = createAnalysisCache({ maxEntries: 5000, ttlMs: 2 * 60 * 60 * 1000 });
+const analysisCache = createAnalysisCache({
+  maxEntries: 5000,
+  redisClient: getSharedRedisClient()
+});
 const globalAnalysisQueue = createConcurrencyQueue({
   maxConcurrent: Number(process.env.MAX_CONCURRENT_ANALYSES) || 15,
   maxQueueSize: 250,
@@ -240,11 +245,12 @@ async function runDeepDealAnalysis(rawUrl, options = {}) {
   const cacheKey = urlInfo.normalizedUrl.toLowerCase();
 
   if (!options.bypassCache) {
-    const cached = analysisCache.get(cacheKey);
+    const cached = await analysisCache.getAsync(cacheKey);
     if (cached) {
       cached.product.strippedTrackers = urlInfo.strippedTrackers;
       cached.meta.cachedResult = true;
       cached.meta.deduplicatedInFlight = false;
+      recordAnalysis({ retailerName: cached.product.retailerName, cached: true }).catch(() => {});
       return cached;
     }
 
@@ -254,6 +260,7 @@ async function runDeepDealAnalysis(rawUrl, options = {}) {
       shared.product.strippedTrackers = urlInfo.strippedTrackers;
       shared.meta.cachedResult = true;
       shared.meta.deduplicatedInFlight = true;
+      recordAnalysis({ retailerName: shared.product.retailerName, cached: true }).catch(() => {});
       return shared;
     }
   }
@@ -268,7 +275,10 @@ async function runDeepDealAnalysis(rawUrl, options = {}) {
 
   const finalResult = await workPromise;
   if (!options.bypassCache && finalResult) {
-    analysisCache.set(cacheKey, finalResult);
+    await analysisCache.setAsync(cacheKey, finalResult);
+  }
+  if (finalResult && finalResult.product) {
+    recordAnalysis({ retailerName: finalResult.product.retailerName, cached: false }).catch(() => {});
   }
   return structuredClone(finalResult);
 }

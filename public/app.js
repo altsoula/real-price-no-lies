@@ -6,6 +6,9 @@
 
   let lastReport = null;
   let currentChartRange = 180;
+  let turnstileWidgetId = null;
+  let turnstileSiteKey = '';
+  let turnstileToken = '';
 
   function formatMoney(amount, currency) {
     const num = Number(amount);
@@ -499,7 +502,20 @@
       const tdShip = document.createElement('td');
       tdShip.textContent = `${comp.shipping} · ${comp.stock}`;
 
-      tr.append(tdStore, tdPrice, tdDelta, tdShip);
+      const tdOffer = document.createElement('td');
+      if (typeof comp.offerUrl === 'string' && comp.offerUrl.startsWith('https://')) {
+        const offerLink = document.createElement('a');
+        offerLink.href = comp.offerUrl;
+        offerLink.target = '_blank';
+        offerLink.rel = comp.isAffiliate ? 'sponsored noopener noreferrer' : 'noopener noreferrer';
+        offerLink.className = 'offer-link-btn mono';
+        offerLink.textContent = comp.isTargetStore ? 'View Store ↗' : 'Check Offer ↗';
+        tdOffer.appendChild(offerLink);
+      } else {
+        tdOffer.textContent = '-';
+      }
+
+      tr.append(tdStore, tdPrice, tdDelta, tdShip, tdOffer);
       compBody.appendChild(tr);
     });
 
@@ -578,12 +594,17 @@
     }, 240);
 
     try {
+      const requestBody = { url: candidate };
+      if (turnstileSiteKey && turnstileToken) {
+        requestBody.turnstileToken = turnstileToken;
+      }
+
       const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ url: candidate })
+        body: JSON.stringify(requestBody)
       });
 
       const payload = await response.json();
@@ -599,12 +620,54 @@
       clearInterval(stepTimer);
       if (progressPanel) progressPanel.classList.add('hidden');
       if (analyzeBtn) analyzeBtn.disabled = false;
+      if (turnstileWidgetId !== null && window.turnstile && typeof window.turnstile.reset === 'function') {
+        turnstileToken = '';
+        window.turnstile.reset(turnstileWidgetId);
+      }
     }
+  }
+
+  function initTurnstileIfConfigured() {
+    const slot = document.getElementById('turnstile-widget-slot');
+    if (!slot) return;
+
+    const cfgPromise =
+      window.__rpnlPublicConfigPromise ||
+      fetch('/api/public-config', { method: 'GET' })
+        .then((r) => (r.ok ? r.json() : {}))
+        .catch(() => ({}));
+
+    cfgPromise.then((cfg) => {
+      if (!cfg || !cfg.turnstileSiteKey) return;
+      turnstileSiteKey = cfg.turnstileSiteKey;
+      slot.classList.remove('hidden');
+
+      window.__onRpnlTurnstileLoad = () => {
+        if (!window.turnstile || turnstileWidgetId !== null) return;
+        turnstileWidgetId = window.turnstile.render(slot, {
+          sitekey: turnstileSiteKey,
+          theme: document.documentElement.getAttribute('data-theme') === 'carbon' ? 'dark' : 'light',
+          callback: (token) => {
+            turnstileToken = token;
+          },
+          'expired-callback': () => {
+            turnstileToken = '';
+          }
+        });
+      };
+
+      const s = document.createElement('script');
+      s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=__onRpnlTurnstileLoad';
+      s.async = true;
+      s.defer = true;
+      document.head.appendChild(s);
+    });
   }
 
   function initApp() {
     initTheme();
     initTermsModal();
+    initTurnstileIfConfigured();
     updateClock();
     setInterval(updateClock, 30_000);
 

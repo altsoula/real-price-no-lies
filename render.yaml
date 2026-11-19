@@ -17,6 +17,8 @@ services:
         value: "true"
       - key: PUBLIC_SITE_URL
         value: https://realpricenolies.online
+      - key: CACHE_TTL_HOURS
+        value: "8"
       - key: MAX_DAILY_GEMINI_CALLS
         value: "500"
       - key: MAX_MINUTE_GEMINI_CALLS
@@ -27,4 +29,3 @@ services:
         value: "12"
       - key: GEMINI_API_KEY
         sync: false
-

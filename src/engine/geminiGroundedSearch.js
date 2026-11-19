@@ -243,7 +243,7 @@ async function runGeminiGroundedProductResearch({
     return { found: false, status: 'UNCONFIGURED' };
   }
 
-  const quota = defaultBudgetGuard.tryConsume();
+  const quota = await defaultBudgetGuard.tryConsumeAsync();
   if (!quota.allowed) {
     return { found: false, status: quota.reason };
   }

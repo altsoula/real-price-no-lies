@@ -2,18 +2,22 @@
 
 const fs = require('node:fs');
 const http = require('node:http');
+const https = require('node:https');
 const path = require('node:path');
 const { loadLocalEnv } = require('./config/env');
 loadLocalEnv();
 
 const { applySecurityHeaders } = require('./security/headers');
 const { createRateLimiter, getClientIp } = require('./security/rateLimiter');
-const { RequestValidationError, readSafeJsonBody } = require('./security/sanitizer');
+const { RequestValidationError, readSafeJsonBody, sanitizeText } = require('./security/sanitizer');
 const { UrlSecurityError } = require('./security/urlGuard');
 const { QueueOverflowError } = require('./security/concurrencyQueue');
 const { PRESET_BENCHMARKS } = require('./engine/retailerCatalog');
 const { analysisCache, globalAnalysisQueue, runDeepDealAnalysis } = require('./engine/aiAgent');
-const { getBudgetStats } = require('./engine/geminiBudgetGuard');
+const { getBudgetStatsAsync } = require('./engine/geminiBudgetGuard');
+const { hasActiveAffiliatePartners } = require('./engine/affiliateLinks');
+const { getSharedRedisClient } = require('./storage/redisClient');
+const { getPublicTrafficStats, recordPageView } = require('./storage/trafficMetrics');
 
 const PUBLIC_DIR = path.resolve(__dirname, '..', 'public');
 
@@ -37,6 +41,128 @@ function sendJson(res, statusCode, payload, extraHeaders = {}) {
     ...extraHeaders
   });
   res.end(body);
+}
+
+function getValidAdsenseClientId() {
+  const id = (process.env.ADSENSE_CLIENT_ID || '').trim();
+  return /^ca-pub-\d{10,20}$/.test(id) ? id : '';
+}
+
+function parseDirectCampaignsEnv() {
+  const raw = (process.env.DIRECT_CAMPAIGNS_JSON || '').trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const cleaned = {};
+    for (const slot of ['top-leaderboard', 'in-report-native', 'footer-leaderboard']) {
+      const c = parsed[slot];
+      if (!c || typeof c !== 'object' || !c.enabled) continue;
+      let targetUrl = '';
+      try {
+        const u = new URL(String(c.targetUrl || '').trim());
+        if (u.protocol === 'https:') targetUrl = u.toString();
+      } catch {
+        targetUrl = '';
+      }
+      if (!targetUrl) continue;
+      cleaned[slot] = {
+        enabled: true,
+        sponsorName: sanitizeText(c.sponsorName || 'SPONSOR', 40),
+        headline: sanitizeText(c.headline || '', 120),
+        description: sanitizeText(c.description || '', 220),
+        ctaText: sanitizeText(c.ctaText || 'Learn More', 32),
+        targetUrl
+      };
+    }
+    return Object.keys(cleaned).length > 0 ? cleaned : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildPublicConfigPayload() {
+  const adsenseClientId = getValidAdsenseClientId();
+  const directCampaigns = parseDirectCampaignsEnv();
+  const cfSiteKey = (process.env.CF_TURNSTILE_SITE_KEY || '').trim();
+  const cfSecretKey = (process.env.CF_TURNSTILE_SECRET_KEY || '').trim();
+
+  return {
+    adsenseClientId,
+    adsenseSlots: {
+      'top-leaderboard': (process.env.ADSENSE_SLOT_TOP || '').trim(),
+      'in-report-native': (process.env.ADSENSE_SLOT_NATIVE || '').trim(),
+      'footer-leaderboard': (process.env.ADSENSE_SLOT_FOOTER || '').trim()
+    },
+    directCampaigns,
+    cfWebAnalyticsToken: (process.env.CF_WEB_ANALYTICS_TOKEN || '').trim(),
+    plausibleDomain: (process.env.PLAUSIBLE_DOMAIN || '').trim(),
+    turnstileSiteKey: cfSiteKey && cfSecretKey ? cfSiteKey : '',
+    affiliateDisclosureActive: hasActiveAffiliatePartners()
+  };
+}
+
+function buildAdsTxtBody() {
+  const custom = (process.env.ADS_TXT_CONTENT || '').trim();
+  if (custom) {
+    return `${custom}\n`;
+  }
+  const clientId = getValidAdsenseClientId();
+  if (clientId) {
+    const pubId = clientId.replace(/^ca-/, '');
+    return `google.com, ${pubId}, DIRECT, f08c47fec0942fa0\n`;
+  }
+  return '# realpricenolies.online ads.txt - configure ADSENSE_CLIENT_ID in environment variables to publish authorized sellers\n';
+}
+
+/**
+ * Verifies an optional Cloudflare Turnstile challenge token when Turnstile is enabled.
+ */
+function verifyTurnstileToken(token, remoteIp) {
+  const secret = (process.env.CF_TURNSTILE_SECRET_KEY || '').trim();
+  if (!secret) return Promise.resolve(true);
+  if (typeof token !== 'string' || !token.trim() || token.length > 4096) {
+    return Promise.resolve(false);
+  }
+
+  const form = new URLSearchParams({
+    secret,
+    response: token.trim(),
+    remoteip: String(remoteIp || '')
+  }).toString();
+
+  return new Promise((resolve) => {
+    const req = https.request(
+      'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+      {
+        method: 'POST',
+        timeout: 4000,
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(form)
+        }
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          try {
+            const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            resolve(Boolean(data && data.success === true));
+          } catch {
+            resolve(false);
+          }
+        });
+      }
+    );
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.on('error', () => resolve(false));
+    req.write(form);
+    req.end();
+  });
 }
 
 /**
@@ -73,10 +199,12 @@ function resolveStaticFile(pathname) {
  */
 function createAppServer(options = {}) {
   const defaultRateMax = Number(process.env.RATE_LIMIT_MAX_REQUESTS) || 12;
+  const redisClient = options.redisClient !== undefined ? options.redisClient : getSharedRedisClient();
   const rateLimiter = createRateLimiter({
     windowMs: options.rateLimitWindowMs || 60_000,
     maxRequests: options.rateLimitMaxRequests || defaultRateMax,
-    maxTrackedIps: 5000
+    maxTrackedIps: 5000,
+    redisClient
   });
 
   const server = http.createServer(async (req, res) => {
@@ -108,19 +236,55 @@ function createAppServer(options = {}) {
           sendJson(res, 405, { error: 'METHOD_NOT_ALLOWED', message: 'Use GET for /api/health.' });
           return;
         }
+        const [geminiBudget, traffic] = await Promise.all([
+          getBudgetStatsAsync(),
+          getPublicTrafficStats()
+        ]);
         sendJson(res, 200, {
           status: 'ok',
           service: 'realpricenolies',
           security: 'hardened',
           zeroPii: true,
+          redis: {
+            configured: Boolean(redisClient && redisClient.isConfigured()),
+            connected: Boolean(redisClient && redisClient.isConnected())
+          },
           cache: {
             entries: analysisCache.size(),
-            inFlight: analysisCache.inFlightSize()
+            inFlight: analysisCache.inFlightSize(),
+            ttlHours: analysisCache.ttlHours
           },
           concurrency: globalAnalysisQueue.stats(),
-          geminiBudget: getBudgetStats(),
+          geminiBudget,
+          traffic,
           timestamp: new Date().toISOString()
         });
+        return;
+      }
+
+      // --- API: Aggregate Proof-of-Traffic Counters (Zero PII) ---
+      if (pathname === '/api/stats') {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          sendJson(res, 405, { error: 'METHOD_NOT_ALLOWED', message: 'Use GET for /api/stats.' });
+          return;
+        }
+        const stats = await getPublicTrafficStats();
+        sendJson(res, 200, {
+          status: 'ok',
+          service: 'realpricenolies',
+          zeroPii: true,
+          ...stats
+        });
+        return;
+      }
+
+      // --- API: Safe Public Frontend Config (AdSense / Turnstile / Analytics / Affiliate Disclosure) ---
+      if (pathname === '/api/public-config') {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          sendJson(res, 405, { error: 'METHOD_NOT_ALLOWED', message: 'Use GET for /api/public-config.' });
+          return;
+        }
+        sendJson(res, 200, buildPublicConfigPayload());
         return;
       }
 
@@ -148,7 +312,7 @@ function createAppServer(options = {}) {
         }
 
         const ip = getClientIp(req);
-        const quota = rateLimiter.consume(ip);
+        const quota = await rateLimiter.consumeAsync(ip);
         res.setHeader('X-RateLimit-Limit', String(quota.limit));
         res.setHeader('X-RateLimit-Remaining', String(quota.remaining));
         res.setHeader('X-RateLimit-Reset', String(quota.resetEpochSec));
@@ -175,6 +339,19 @@ function createAppServer(options = {}) {
           return;
         }
 
+        const cfSiteKey = (process.env.CF_TURNSTILE_SITE_KEY || '').trim();
+        const cfSecretKey = (process.env.CF_TURNSTILE_SECRET_KEY || '').trim();
+        if (cfSiteKey && cfSecretKey) {
+          const okTurnstile = await verifyTurnstileToken(body.turnstileToken, ip);
+          if (!okTurnstile) {
+            sendJson(res, 403, {
+              error: 'TURNSTILE_VERIFICATION_FAILED',
+              message: 'Please complete the quick browser verification check before inspecting this URL.'
+            });
+            return;
+          }
+        }
+
         const analysis = await runDeepDealAnalysis(body.url);
         sendJson(res, 200, analysis);
         return;
@@ -182,6 +359,27 @@ function createAppServer(options = {}) {
 
       if (isApiRoute) {
         sendJson(res, 404, { error: 'NOT_FOUND', message: 'API endpoint not found.' });
+        return;
+      }
+
+      // --- AdSense / Programmatic Ads Authorization File ---
+      if (pathname === '/ads.txt') {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('Method Not Allowed');
+          return;
+        }
+        const adsTxt = buildAdsTxtBody();
+        res.writeHead(200, {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Content-Length': Buffer.byteLength(adsTxt),
+          'Cache-Control': 'public, max-age=3600'
+        });
+        if (req.method === 'HEAD') {
+          res.end();
+          return;
+        }
+        res.end(adsTxt);
         return;
       }
 
@@ -209,6 +407,38 @@ function createAppServer(options = {}) {
         const ext = path.extname(filePath).toLowerCase();
         const contentType = MIME_TYPES[ext] || 'application/octet-stream';
         const noCacheExt = ext === '.html' || ext === '.css' || ext === '.js';
+
+        if (ext === '.html' && req.method === 'GET') {
+          recordPageView().catch(() => {});
+        }
+
+        const adsenseId = ext === '.html' ? getValidAdsenseClientId() : '';
+        if (adsenseId) {
+          fs.readFile(filePath, 'utf8', (readErr, html) => {
+            if (readErr) {
+              if (!res.headersSent) {
+                res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+              }
+              res.end('Internal Server Error');
+              return;
+            }
+            const metaTag = `  <meta name="google-adsense-account" content="${adsenseId}">\n</head>`;
+            const finalHtml = html.includes('</head>') ? html.replace('</head>', metaTag) : html;
+            const buf = Buffer.from(finalHtml, 'utf8');
+            res.writeHead(200, {
+              'Content-Type': contentType,
+              'Content-Length': buf.length,
+              'Cache-Control': 'no-cache, must-revalidate'
+            });
+            if (req.method === 'HEAD') {
+              res.end();
+              return;
+            }
+            res.end(buf);
+          });
+          return;
+        }
+
         res.writeHead(200, {
           'Content-Type': contentType,
           'Content-Length': stats.size,
@@ -276,6 +506,8 @@ if (require.main === module) {
 
 module.exports = {
   PUBLIC_DIR,
+  buildAdsTxtBody,
+  buildPublicConfigPayload,
   createAppServer,
   resolveStaticFile
 };

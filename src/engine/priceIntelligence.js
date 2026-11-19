@@ -8,6 +8,7 @@ const {
   parseProductFromPath
 } = require('./retailerCatalog');
 const { sanitizeText } = require('../security/sanitizer');
+const { enrichCompetitorsWithLinks } = require('./affiliateLinks');
 
 function clamp(val, min, max) {
   return Math.max(min, Math.min(max, val));
@@ -624,14 +625,23 @@ function analyzeProductPricing({ urlInfo, liveSignals, webSearch, geminiGrounded
     competitors: market.competitors
   });
 
-  const sortedCompetitors = [...market.competitors]
-    .sort((a, b) => a.price - b.price)
-    .map((c, idx) => ({
-      ...c,
-      isBestPrice: idx === 0,
-      isTargetStore: c.retailer.toLowerCase() === retailer.name.toLowerCase(),
-      deltaVsTarget: round2(c.price - market.currentPrice)
-    }));
+  const sortedCompetitors = enrichCompetitorsWithLinks(
+    [...market.competitors]
+      .sort((a, b) => a.price - b.price)
+      .map((c, idx) => ({
+        ...c,
+        isBestPrice: idx === 0,
+        isTargetStore: c.retailer.toLowerCase() === retailer.name.toLowerCase(),
+        deltaVsTarget: round2(c.price - market.currentPrice)
+      })),
+    {
+      title,
+      sku,
+      currency: market.currency,
+      normalizedUrl: urlInfo.normalizedUrl,
+      retailerDomain: urlInfo.hostname
+    }
+  );
 
   const windowComparisons = buildWindowComparisons(priceHistory, market.currentPrice, sortedCompetitors);
   const bestAlternative = sortedCompetitors[0];
@@ -671,7 +681,9 @@ function analyzeProductPricing({ urlInfo, liveSignals, webSearch, geminiGrounded
       liveFetched: Boolean(liveSignals && liveSignals.liveFetched),
       liveFetchNote:
         liveSignals && liveSignals.liveFetched
-          ? 'Verified live page metadata & Schema.org tags via SSRF-pinned HTTPS request'
+          ? liveSignals.viaProxy
+            ? 'Verified live page metadata via SSRF-guarded residential proxy fallback'
+            : 'Verified live page metadata & Schema.org tags via SSRF-pinned HTTPS request'
           : (liveSignals && liveSignals.reason) || 'Analyzed via structural URL & market benchmark index',
       webSearchUsed: Boolean(webSearch && webSearch.found),
       webSearchNote: (webSearch && (webSearch.sourceNote || webSearch.reason)) || null,

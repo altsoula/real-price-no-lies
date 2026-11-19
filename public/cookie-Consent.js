@@ -5,14 +5,9 @@
   const CONSENT_COOKIE_NAME = 'rpnl_consent';
 
   /**
-   * Production Monetization & Sponsor Configuration.
-   * Keep `enabled: false` to hide ad containers completely when no live buyer/network is active.
-   *
-   * Option A — Direct Sponsor Buyer (`provider: 'direct'`):
-   *   Set `enabled: true` and configure any slot under `directCampaigns` with `enabled: true`.
-   * Option B — Google AdSense (`provider: 'adsense'`):
-   *   Set `enabled: true`, fill `adsenseClientId` ('ca-pub-...'), and slot IDs in `adsenseSlots`,
-   *   and whitelist Google AdSense domains in `src/security/headers.js` CSP.
+   * Production Monetization & Traffic Telemetry Configuration.
+   * Automatically hydrated at runtime from GET /api/public-config (environment variables),
+   * keeping slots completely hidden when no live campaign/AdSense client is active.
    */
   const AD_MONETIZATION_CONFIG = {
     enabled: false,
@@ -50,6 +45,20 @@
       }
     }
   };
+
+  let adsenseScriptInjected = false;
+  let cfAnalyticsInjected = false;
+  let plausibleInjected = false;
+
+  function loadPublicConfig() {
+    if (window.__rpnlPublicConfigPromise) {
+      return window.__rpnlPublicConfigPromise;
+    }
+    window.__rpnlPublicConfigPromise = fetch('/api/public-config', { method: 'GET' })
+      .then((res) => (res.ok ? res.json() : {}))
+      .catch(() => ({}));
+    return window.__rpnlPublicConfigPromise;
+  }
 
   function isSafeExternalUrl(rawUrl) {
     if (typeof rawUrl !== 'string' || !rawUrl.trim()) return null;
@@ -103,6 +112,40 @@
     return normalized;
   }
 
+  function injectAdsenseScript(clientId) {
+    if (adsenseScriptInjected || !/^ca-pub-\d{10,20}$/.test(clientId || '')) return;
+    adsenseScriptInjected = true;
+    const script = document.createElement('script');
+    script.async = true;
+    script.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(clientId)}`;
+    script.crossOrigin = 'anonymous';
+    document.head.appendChild(script);
+  }
+
+  function injectAnalyticsScripts(config, consent) {
+    // Cloudflare Web Analytics is cookieless & zero-PII
+    const cfToken = config && typeof config.cfWebAnalyticsToken === 'string' ? config.cfWebAnalyticsToken.trim() : '';
+    if (cfToken && !cfAnalyticsInjected) {
+      cfAnalyticsInjected = true;
+      const beacon = document.createElement('script');
+      beacon.defer = true;
+      beacon.src = 'https://static.cloudflareinsights.com/beacon.min.js';
+      beacon.setAttribute('data-cf-beacon', JSON.stringify({ token: cfToken }));
+      document.head.appendChild(beacon);
+    }
+
+    // Plausible analytics (cookieless, gated behind analytics consent)
+    const plausibleDomain = config && typeof config.plausibleDomain === 'string' ? config.plausibleDomain.trim() : '';
+    if (plausibleDomain && consent && consent.analytics && !plausibleInjected) {
+      plausibleInjected = true;
+      const p = document.createElement('script');
+      p.defer = true;
+      p.setAttribute('data-domain', plausibleDomain);
+      p.src = 'https://plausible.io/js/script.js';
+      document.head.appendChild(p);
+    }
+  }
+
   function renderDirectSponsor(bodyEl, campaign) {
     const safeHref = isSafeExternalUrl(campaign.targetUrl);
     if (!safeHref) return false;
@@ -140,6 +183,7 @@
 
   function renderAdsenseUnit(bodyEl, clientId, slotId) {
     if (!clientId || !slotId) return false;
+    injectAdsenseScript(clientId);
     bodyEl.replaceChildren();
     const ins = document.createElement('ins');
     ins.className = 'adsbygoogle';
@@ -149,12 +193,11 @@
     ins.setAttribute('data-ad-format', 'auto');
     ins.setAttribute('data-full-width-responsive', 'true');
     bodyEl.appendChild(ins);
-    if (Array.isArray(window.adsbygoogle)) {
-      try {
-        window.adsbygoogle.push({});
-      } catch {
-        return false;
-      }
+    try {
+      window.adsbygoogle = window.adsbygoogle || [];
+      window.adsbygoogle.push({});
+    } catch {
+      return false;
     }
     return true;
   }
@@ -192,6 +235,8 @@
         if (renderAdsenseUnit(bodyEl, AD_MONETIZATION_CONFIG.adsenseClientId, slotId)) {
           rail.classList.remove('hidden');
         } else {
+          // Even when individual slots are unset, Auto Ads still benefit from script injection
+          injectAdsenseScript(AD_MONETIZATION_CONFIG.adsenseClientId);
           rail.classList.add('hidden');
           bodyEl.replaceChildren();
         }
@@ -201,6 +246,27 @@
       rail.classList.add('hidden');
       bodyEl.replaceChildren();
     });
+  }
+
+  function applyServerConfig(cfg, consent) {
+    if (!cfg || typeof cfg !== 'object') return;
+    if (cfg.directCampaigns && typeof cfg.directCampaigns === 'object') {
+      AD_MONETIZATION_CONFIG.enabled = true;
+      AD_MONETIZATION_CONFIG.provider = 'direct';
+      Object.assign(AD_MONETIZATION_CONFIG.directCampaigns, cfg.directCampaigns);
+    } else if (/^ca-pub-\d{10,20}$/.test(cfg.adsenseClientId || '')) {
+      AD_MONETIZATION_CONFIG.enabled = true;
+      AD_MONETIZATION_CONFIG.provider = 'adsense';
+      AD_MONETIZATION_CONFIG.adsenseClientId = cfg.adsenseClientId;
+      if (cfg.adsenseSlots && typeof cfg.adsenseSlots === 'object') {
+        Object.assign(AD_MONETIZATION_CONFIG.adsenseSlots, cfg.adsenseSlots);
+      }
+      if (consent && consent.advertising) {
+        injectAdsenseScript(cfg.adsenseClientId);
+      }
+    }
+    injectAnalyticsScripts(cfg, consent);
+    syncAdSlots(consent);
   }
 
   function initCookieManager() {
@@ -215,6 +281,8 @@
     const openFooterBtn = document.getElementById('footer-cookies-btn');
     const analyticsCheckbox = document.getElementById('toggle-analytics-cookie');
     const adsCheckbox = document.getElementById('toggle-ads-cookie');
+
+    let loadedConfig = null;
 
     function openCookieModal() {
       const current = readConsent() || { necessary: true, analytics: false, advertising: false };
@@ -231,7 +299,7 @@
       const saved = writeConsent(prefs);
       if (banner) banner.classList.add('hidden');
       closeCookieModal();
-      syncAdSlots(saved);
+      applyServerConfig(loadedConfig, saved);
     }
 
     const existing = readConsent();
@@ -241,6 +309,11 @@
     } else {
       syncAdSlots(existing);
     }
+
+    loadPublicConfig().then((cfg) => {
+      loadedConfig = cfg;
+      applyServerConfig(cfg, readConsent());
+    });
 
     if (acceptAllBtn) {
       acceptAllBtn.addEventListener('click', () => {

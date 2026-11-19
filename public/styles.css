@@ -972,6 +972,89 @@ body {
   color: #ffffff;
 }
 
+.offer-link-btn {
+  display: inline-block;
+  border: 1.5px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 800;
+  padding: 3px 8px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.offer-link-btn:hover {
+  background: var(--brand-cobalt);
+  border-color: var(--brand-cobalt);
+  color: #ffffff;
+}
+
+.affiliate-disclosure-note {
+  margin: 12px 0 0;
+  font-size: 11px;
+  color: var(--ink-muted);
+  border-top: 1px dashed var(--border-soft);
+  padding-top: 10px;
+}
+
+.turnstile-slot {
+  margin-top: 12px;
+}
+
+/* Subpages: About, Privacy, Contact/Sponsor & Guides */
+.prose-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.prose-card h1 {
+  margin: 0;
+  font-size: 26px;
+  letter-spacing: -0.02em;
+}
+
+.prose-card h2 {
+  margin: 8px 0 0;
+  font-size: 17px;
+  border-bottom: 1px solid var(--border-soft);
+  padding-bottom: 6px;
+}
+
+.prose-card p,
+.prose-card li {
+  font-size: 14px;
+  color: var(--ink-muted);
+  margin: 0;
+}
+
+.prose-card ul {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.stats-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.cta-row a {
+  text-decoration: none;
+}
+
 /* AI Findings */
 .ai-headline {
   font-size: 15px;
